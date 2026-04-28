@@ -1,0 +1,297 @@
+/* ============================================================
+   RELETIX AI — Design Tokens
+   Colors + Type (root stylesheet for every surface)
+   ============================================================ */
+
+/* Font stack modeled on Claude's interfaces:
+   - Serif display: Copernicus → Fraunces (Google Fonts, closest open match)
+   - Sans UI/body:  Styrene   → Inter    (Google Fonts, closest open match)
+   - Mono:          cmu-typewriter → JetBrains Mono (closest open match)
+   All three are flagged substitutions — swap in the proprietary files if licensed. */
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+  /* ---------- Brand / Primary ---------- */
+  --reletix-primary:       #1A5DC8;  /* Primary Blue — default brand color */
+  --reletix-bright:        #2D7FF9;  /* Bright Blue — links, interactive, dark-mode mark */
+  --reletix-light-blue:    #E8F0FE;  /* Light Blue — subtle backgrounds, chips */
+
+  /* ---------- Neutral scale ---------- */
+  --ink:    #0F1419;   /* body text, wordmark, dark surfaces */
+  --slate:  #3D4654;   /* secondary text, captions */
+  --muted:  #8892A2;   /* tertiary text, metadata */
+  --paper:  #F7F8FA;   /* code blocks, recessive surfaces */
+  --white:  #FFFFFF;   /* canvas */
+
+  /* Derived neutrals (kept minimal — brand is restrained) */
+  --hairline: rgba(15, 20, 25, 0.08);  /* 1px dividers */
+  --hairline-strong: rgba(15, 20, 25, 0.14);
+
+  /* ---------- Accent (functional only) ---------- */
+  --accent-green: #10B981;  /* success, approved */
+  --accent-amber: #F59E0B;  /* warning, revise */
+
+  /* ---------- Semantic — foreground ---------- */
+  --fg-1: var(--ink);    /* primary text */
+  --fg-2: var(--slate);  /* secondary text */
+  --fg-3: var(--muted);  /* tertiary text / metadata */
+  --fg-link: var(--reletix-bright);
+  --fg-brand: var(--reletix-primary);
+  --fg-inverse: var(--white);
+
+  /* ---------- Semantic — background ---------- */
+  --bg-1: var(--white);            /* canvas */
+  --bg-2: var(--paper);            /* recessive / code */
+  --bg-3: var(--reletix-light-blue); /* subtle brand tint */
+  --bg-ink: var(--ink);            /* dark surfaces */
+  --bg-brand: var(--reletix-primary);
+
+  /* ---------- Borders ---------- */
+  --border-hair: 1px solid var(--hairline);
+  --border-strong: 1px solid var(--hairline-strong);
+  --border-accent: 3px solid var(--reletix-primary);  /* Ghost article top border */
+  --border-code-left: 2px solid var(--reletix-primary); /* Code block left rail */
+
+  /* ---------- Radii — modern, soft, pill-leaning ----------
+     Inspired by Linear / Arc / Raycast: buttons pill by default, cards
+     generously rounded. Keep --radius-1 for tiny UI (badges, kbd keys),
+     everything else reaches for 12px+. */
+  --radius-0: 0;
+  --radius-1: 6px;     /* micro — badges, inline kbd */
+  --radius-2: 12px;    /* inputs, small chips */
+  --radius-3: 16px;    /* cards, panels */
+  --radius-4: 24px;    /* modals, sheets, hero surfaces */
+  --radius-pill: 999px;/* buttons (default), tags, segmented controls */
+  --radius-app: 22%;   /* app icon squircle */
+
+  /* ---------- Shadow — a proper scale, used deliberately ----------
+     Every shadow pairs an ambient (soft, spread) and a direct (tight) layer
+     so surfaces read as real objects sitting above the page. Colors are
+     blue-tinted so shadows feel at home with the brand rather than neutral
+     grey. Use lower steps for at-rest surfaces; reserve 4–5 for modals and
+     emphatic CTAs. */
+  --shadow-none: none;
+  --shadow-1:
+    0 1px 2px   rgba(15, 20, 25, 0.05),
+    0 1px 1px   rgba(15, 20, 25, 0.03);                              /* resting cards */
+  --shadow-2:
+    0 2px 4px   rgba(15, 20, 25, 0.06),
+    0 4px 12px  rgba(15, 20, 25, 0.05);                              /* hoverable cards */
+  --shadow-3:
+    0 4px 8px   rgba(15, 20, 25, 0.07),
+    0 12px 24px rgba(15, 20, 25, 0.07);                              /* menus, popovers */
+  --shadow-4:
+    0 8px 16px  rgba(15, 20, 25, 0.08),
+    0 24px 48px rgba(15, 20, 25, 0.10);                              /* modals, sheets */
+  --shadow-5:
+    0 16px 32px rgba(15, 20, 25, 0.10),
+    0 40px 80px rgba(15, 20, 25, 0.14);                              /* hero / command-k */
+
+  /* Brand-tinted shadow — for primary CTAs and brand surfaces */
+  --shadow-brand-2:
+    0 4px 12px  rgba(26, 93, 200, 0.18),
+    0 1px 2px   rgba(26, 93, 200, 0.10);
+  --shadow-brand-3:
+    0 10px 24px rgba(26, 93, 200, 0.26),
+    0 2px 4px   rgba(26, 93, 200, 0.14);
+
+  /* Inner / pressed — for active states, recessed surfaces */
+  --shadow-inset: inset 0 1px 2px rgba(15, 20, 25, 0.08);
+
+  --shadow-focus: 0 0 0 3px rgba(45, 127, 249, 0.24);  /* keyboard focus ring */
+
+  /* ---------- Spacing scale (4px base) ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;   /* paragraph gap */
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+  --sp-9: 96px;
+
+  /* ---------- Layout ---------- */
+  --measure: 680px;        /* max article width */
+  --measure-tight: 560px;  /* caption / narrow measure */
+
+  /* ---------- Type families (Claude-interface stack) ---------- */
+  /* Serif display — Claude uses Copernicus; we substitute Fraunces. */
+  --font-serif: 'Fraunces', 'Copernicus', 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+  /* Sans UI/body — Claude uses Styrene; we substitute Inter. */
+  --font-sans:  'Inter', 'Styrene A', 'Styrene B', 'Helvetica Neue', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Mono — Claude uses cmu-typewriter; we substitute JetBrains Mono. */
+  --font-mono:  'JetBrains Mono', 'cmu-typewriter', 'SF Mono', Menlo, Consolas, monospace;
+
+  /* ---------- Type scale (from brand guide §4) ---------- */
+  --fs-display:  32px;
+  --fs-heading:  22px;
+  --fs-subhead:  18px;
+  --fs-body:     16px;
+  --fs-caption:  14px;
+  --fs-mono:     14px;
+  --fs-micro:    12px;  /* tags, status badges only */
+
+  /* Weights — tight system. Bold is reserved. */
+  --fw-regular:  400;
+  --fw-medium:   500;  /* headings */
+  --fw-semibold: 600;  /* labels, strong emphasis */
+  --fw-bold:     700;  /* sparingly — wordmark, critical emphasis */
+
+  /* Line heights */
+  --lh-tight:  1.2;   /* display */
+  --lh-snug:   1.35;  /* headings */
+  --lh-ui:     1.5;   /* UI, captions */
+  --lh-read:   1.7;   /* long-form body */
+
+  /* Tracking (display gets +1px letter-spacing per brand guide) */
+  --tr-display:  0.031em;  /* ≈ +1px at 32px */
+  --tr-wordmark: 0.24em;   /* "R E L E T I X   A I" treatment */
+  --tr-tight:    -0.01em;
+  --tr-normal:   0;
+
+  /* ---------- Motion ---------- */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out:      cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast:   120ms;
+  --dur-base:   180ms;
+  --dur-slow:   320ms;
+}
+
+/* ============================================================
+   Semantic element styles
+   Use directly OR compose via utility classes.
+   ============================================================ */
+
+html, body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-read);
+  color: var(--fg-1);
+  background: var(--bg-1);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+.display, h1 {
+  font-family: var(--font-serif);
+  font-size: var(--fs-display);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-tight);
+  letter-spacing: 0;
+  color: var(--fg-1);
+  margin: 0 0 var(--sp-5);
+}
+
+.heading, h2 {
+  font-size: var(--fs-heading);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-snug);
+  letter-spacing: 0;
+  color: var(--fg-1);
+  margin: var(--sp-7) 0 var(--sp-3);
+}
+
+.subhead, h3 {
+  font-size: var(--fs-subhead);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-snug);
+  color: var(--fg-1);
+  margin: var(--sp-5) 0 var(--sp-2);
+}
+
+p, .body {
+  font-size: var(--fs-body);
+  line-height: var(--lh-read);
+  color: var(--fg-1);
+  margin: 0 0 var(--sp-4);
+  max-width: var(--measure);
+  text-wrap: pretty;
+}
+
+.caption, small {
+  font-size: var(--fs-caption);
+  line-height: var(--lh-ui);
+  color: var(--fg-3);
+}
+
+.mono, code, pre, kbd, samp {
+  font-family: var(--font-mono);
+  font-size: var(--fs-mono);
+  line-height: var(--lh-ui);
+}
+
+code {
+  background: var(--bg-2);
+  padding: 2px 6px;
+  border-radius: var(--radius-1);
+  color: var(--ink);
+}
+
+pre {
+  background: var(--bg-2);
+  border-left: var(--border-code-left);
+  padding: var(--sp-4) var(--sp-5);
+  overflow-x: auto;
+  margin: var(--sp-4) 0;
+}
+
+pre code {
+  background: transparent;
+  padding: 0;
+}
+
+a {
+  color: var(--fg-link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+a:hover { color: var(--reletix-primary); }
+
+hr {
+  border: none;
+  border-top: var(--border-hair);
+  margin: var(--sp-7) 0;
+}
+
+strong, b { font-weight: var(--fw-semibold); }
+em, i    { font-style: italic; color: var(--fg-2); }
+
+/* Wordmark treatment — "R E L E T I X  A I" */
+.wordmark {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-bold);
+  letter-spacing: var(--tr-wordmark);
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+/* Signature line — closing brand stamp, italic */
+.signature {
+  font-style: italic;
+  color: var(--fg-3);
+  font-size: var(--fs-caption);
+  text-align: center;
+  margin-top: var(--sp-7);
+}
+
+/* Status badges — functional color only */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: var(--radius-1);
+  line-height: 1;
+}
+.badge--approved { color: var(--accent-green); background: rgba(16, 185, 129, 0.10); }
+.badge--revise   { color: var(--accent-amber); background: rgba(245, 158, 11, 0.10); }
+.badge--hold     { color: var(--slate); background: rgba(15, 20, 25, 0.06); }
+.badge--brand    { color: var(--reletix-primary); background: var(--reletix-light-blue); }

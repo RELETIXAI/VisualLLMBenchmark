@@ -22,6 +22,12 @@ const api = {
   pauseRun:    (id)    => fetch(`/api/runs/${id}/pause`,  {method:"POST"}).then(r => r.json()),
   resumeRun:   (id)    => fetch(`/api/runs/${id}/resume`, {method:"POST"}).then(r => r.json()),
   cancelRun:   (id)    => fetch(`/api/runs/${id}/cancel`, {method:"POST"}).then(r => r.json()),
+  deleteRun:   (id)    => fetch(`/api/runs/${id}`,        {method:"DELETE"}).then(async r => {
+    if (r.status === 404 || r.status === 405) {
+      return {ok: false, status: r.status, _needs_restart: true};
+    }
+    return r.json();
+  }),
   leaderboard: (pid)   => fetch(`/api/leaderboard/${pid}`).then(r => r.json()),
   filteredRuns:(q)     => fetch("/api/runs?" + new URLSearchParams(q || {}).toString()).then(r => r.json()),
   compare:     (ids)   => fetch(`/api/compare?ids=${ids.join(",")}`).then(r => r.json()),
@@ -223,6 +229,7 @@ async function reloadLeaderboardTable() {
         <th>Prompt</th><th>Dataset</th>
         <th>Score</th><th>Accuracy</th><th>Latency</th>
         <th>Tokens (in/out)</th><th>Cost</th><th>Rows</th>
+        <th></th>
       </tr></thead>
       <tbody>
       ${runs.map((r,i) => `<tr ${LB.selected.has(r.id)?'class="lb-selected"':''}>
@@ -242,6 +249,7 @@ async function reloadLeaderboardTable() {
         <td class="num">${fmtNum(r.total_input_tokens||0)} / ${fmtNum(r.total_output_tokens||0)}</td>
         <td class="num">$${(r.total_cost_usd||0).toFixed(4)}</td>
         <td class="num">${r.n_done}/${r.n_rows}</td>
+        <td><button class="link-btn" title="Delete this run" onclick="deleteRunSingle(${r.id})">delete</button></td>
       </tr>`).join("")}
       </tbody>
     </table>
@@ -277,9 +285,58 @@ function renderActionBar() {
       <div><strong>${LB.selected.size}</strong> selected · ${ids.map(i => `<span class="pill">#${i}</span>`).join(" ")}</div>
       <div style="display:flex;gap:8px">
         <button class="btn-ghost" onclick="LB.selected.clear(); reloadLeaderboardTable();">Clear</button>
+        <button class="btn-ghost btn-danger-text" onclick="deleteSelectedRuns()">Delete ${LB.selected.size}</button>
         <button class="btn" ${LB.selected.size < 2 ? "disabled" : ""} onclick="openCompareView()">Compare ${LB.selected.size} →</button>
       </div>
     </div>`;
+}
+
+async function deleteSelectedRuns() {
+  const ids = [...LB.selected].sort((a,b) => a-b);
+  if (!ids.length) return;
+  const msg = ids.length === 1
+    ? `Delete run #${ids[0]}? This removes the run and all its row results. The dataset and prompt are kept.`
+    : `Delete ${ids.length} runs? This removes them and all their row results. Datasets and prompts are kept.\n\nIDs: ${ids.join(", ")}`;
+  if (!confirm(msg)) return;
+
+  let ok = 0, needsRestart = false, fail = 0;
+  for (const id of ids) {
+    const r = await api.deleteRun(id);
+    if (r && r._needs_restart) { needsRestart = true; break; }
+    if (r && r.deleted) { ok++; LB.selected.delete(id); }
+    else fail++;
+  }
+  if (needsRestart) {
+    toast("Server restart required to enable run deletion.");
+    alert(
+      "The server is running an older build that doesn't yet expose DELETE /api/runs/{id}.\n\n" +
+      "The endpoint is in the new code, but the server hasn't been restarted (you asked us not to interrupt your live runs).\n\n" +
+      "Once your runs finish, restart with:\n  ./run.sh\nand try Delete again."
+    );
+    return;
+  }
+  if (ok) toast(`Deleted ${ok} run${ok===1?"":"s"}.${fail?` (${fail} failed)`:""}`);
+  reloadLeaderboardTable();
+}
+
+async function deleteRunSingle(id) {
+  if (!confirm(`Delete run #${id}? This removes the run and all its row results.`)) return;
+  const r = await api.deleteRun(id);
+  if (r && r._needs_restart) {
+    alert(
+      "Server restart required.\n\n" +
+      "The DELETE /api/runs/{id} endpoint is in the new code, but the running server hasn't been restarted yet.\n" +
+      "Restart with ./run.sh once your in-flight runs are done."
+    );
+    return;
+  }
+  if (r && r.deleted) {
+    toast(`Deleted run #${id}.`);
+    LB.selected.delete(id);
+    reloadLeaderboardTable();
+  } else {
+    toast(`Delete failed: ${(r && r.reason) || "unknown"}`);
+  }
 }
 
 // ----- COMPARE VIEW -----

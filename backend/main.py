@@ -266,6 +266,18 @@ def cancel_run(run_id: int):
     return {"ok": runner.cancel_run(run_id)}
 
 
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: int):
+    """Delete a single run (and its row results).  If the run is still
+    running/paused, cancel it first so the worker thread exits cleanly."""
+    full = db.get_run(run_id)
+    if not full:
+        raise HTTPException(404, "Run not found")
+    if full["status"] in ("running", "paused", "pending"):
+        runner.cancel_run(run_id)
+    return db.delete_run(run_id)
+
+
 @app.get("/api/leaderboard/{prompt_id}")
 def get_leaderboard(prompt_id: int):
     return db.leaderboard(prompt_id)

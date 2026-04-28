@@ -287,6 +287,17 @@ def find_dataset_by_name(name: str) -> Optional[dict]:
         return dict(r) if r else None
 
 
+def delete_run(run_id: int) -> dict:
+    """Delete a run and all its row results.  Dataset and prompt are kept."""
+    with _conn() as c:
+        r = c.execute("SELECT id FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not r:
+            return {"deleted": False, "reason": "not found"}
+        c.execute("DELETE FROM row_results WHERE run_id=?", (run_id,))
+        c.execute("DELETE FROM runs WHERE id=?", (run_id,))
+        return {"deleted": True, "run_id": run_id}
+
+
 def leaderboard(prompt_id: int) -> list[dict]:
     """Best run per (provider, model) for this prompt, sorted by composite_score."""
     with _conn() as c:
