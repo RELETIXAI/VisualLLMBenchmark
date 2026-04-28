@@ -988,7 +988,9 @@ function stopActivePoll() {
 async function pollRun(id) {
   stopActivePoll();
   const box = $("#active-run");
+  // Restyle the active-run shell with the brand-tinted "card-live" treatment
   box.classList.remove("hidden");
+  box.classList.add("card-live");
   const myToken = ++_pollToken;
   let active = true;
   _stopActivePoll = () => { active = false; };
@@ -1032,6 +1034,7 @@ function renderActiveRun(r) {
       ${live                    ? `<button class="btn-ghost btn-danger-text" onclick="controlRun('cancel', ${r.id})">✕ Cancel</button>` : ""}
       <button class="btn-ghost" onclick="toggleExpanded()">${ACTIVE.expanded ? "▾ Collapse" : "▸ Expand"} details</button>
     </div>`;
+  const cardClass = live ? "card card-live" : "card";
 
   const summary = `
     <div class="row-between" style="align-items:center;margin:0">
