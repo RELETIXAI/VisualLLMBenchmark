@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Data and runtime artefacts (do NOT commit user uploads, DBs, or extracted images)
+data/benchmark.db
+data/uploads/
+data/images/
+data/_tmp_sample_imgs/
+data/sample_food_benchmark.xlsx
+
+# Secrets
+.env
+.env.local
+*.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+/tmp/

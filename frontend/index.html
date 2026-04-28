@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Reletix · LLM Food Vision Benchmark</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">R</div>
+    <div>
+      <div class="brand-name">Reletix AI</div>
+      <div class="brand-sub">LLM Food Vision Benchmark</div>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button data-tab="leaderboard" class="tab active">Leaderboard</button>
+    <button data-tab="datasets" class="tab">Datasets</button>
+    <button data-tab="prompts" class="tab">Prompts</button>
+    <button data-tab="runs" class="tab">Runs</button>
+    <button data-tab="benchmark" class="tab">Run benchmark</button>
+    <a class="tab" href="/docs" target="_blank" rel="noopener">API ↗</a>
+  </nav>
+</header>
+
+<main>
+  <!-- LEADERBOARD -->
+  <section class="view" id="view-leaderboard">
+    <div class="hero">
+      <h1>The food-vision <em>arena</em>.</h1>
+      <p class="lead">Race vision LLMs on accuracy, latency, tokens and cost. Filter, multi-select, and compare runs side-by-side.</p>
+    </div>
+
+    <div class="card" id="lb-filters">
+      <div class="filter-row">
+        <div class="filter-cell">
+          <label class="label">Provider</label>
+          <select id="lb-provider"><option value="">all</option></select>
+        </div>
+        <div class="filter-cell">
+          <label class="label">Model</label>
+          <select id="lb-model"><option value="">all</option></select>
+        </div>
+        <div class="filter-cell">
+          <label class="label">Prompt</label>
+          <select id="lb-prompt"><option value="">all</option></select>
+        </div>
+        <div class="filter-cell">
+          <label class="label">Dataset</label>
+          <select id="lb-dataset"><option value="">all</option></select>
+        </div>
+        <div class="filter-cell">
+          <label class="label">Status</label>
+          <select id="lb-status">
+            <option value="">all</option>
+            <option value="completed">completed</option>
+            <option value="running">running</option>
+            <option value="paused">paused</option>
+            <option value="cancelled">cancelled</option>
+            <option value="failed">failed</option>
+          </select>
+        </div>
+        <div class="filter-cell" style="display:flex;align-items:flex-end;gap:8px">
+          <label class="small muted" style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="lb-best-only" style="width:auto" /> best per (provider, model)
+          </label>
+          <button class="btn-ghost" onclick="refreshLeaderboard()">Refresh</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="lb-action-bar" class="lb-action-bar hidden"></div>
+    <div id="leaderboard-table"></div>
+    <div id="compare-view"></div>
+  </section>
+
+  <!-- DATASETS -->
+  <section class="view hidden" id="view-datasets">
+    <h2>Datasets</h2>
+    <div class="card">
+      <div class="upload" id="upload-zone">
+        <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" hidden />
+        <div class="upload-inner">
+          <div class="upload-icon">↑</div>
+          <div>Drop your <strong>.xlsx</strong> or <strong>.csv</strong> here, or <a href="#" id="browse-link">browse</a></div>
+          <div class="muted small">Embedded images extracted automatically. Columns auto-detected: image · food · nutrition.</div>
+        </div>
+      </div>
+      <label class="label">Image URL template <span class="muted small">(if image column holds an ID, not a URL)</span></label>
+      <input id="upload-url-tpl" type="text" placeholder="https://willma-prod-assets.s3.eu-central-1.amazonaws.com/meals_images/{image_id}" />
+      <div id="upload-status"></div>
+    </div>
+
+    <h3 class="section-title">Library</h3>
+    <div id="datasets-list"></div>
+  </section>
+
+  <!-- PROMPTS -->
+  <section class="view hidden" id="view-prompts">
+    <h2>Prompts</h2>
+    <p class="muted">Saved system prompts. Each run pairs one prompt with one dataset and one model. Compare runs that share or differ across these axes from the Leaderboard.</p>
+
+    <div class="card">
+      <label class="label">Name</label>
+      <input id="p-name" type="text" placeholder="e.g. Strict-JSON v1" />
+      <label class="label">System prompt</label>
+      <textarea id="p-text" rows="8" placeholder="You are a food analysis expert..."></textarea>
+      <label class="label">Description (optional)</label>
+      <input id="p-desc" type="text" placeholder="What's special about this prompt?" />
+      <div class="row-end">
+        <button class="btn" onclick="createPrompt()">Save prompt</button>
+      </div>
+    </div>
+
+    <h3 class="section-title">Saved prompts</h3>
+    <div id="prompts-list"></div>
+  </section>
+
+  <!-- RUNS -->
+  <section class="view hidden" id="view-runs">
+    <h2>Run history</h2>
+    <div id="runs-list"></div>
+  </section>
+
+  <!-- BENCHMARK -->
+  <section class="view hidden" id="view-benchmark">
+    <h2>Run a benchmark</h2>
+    <div class="card">
+      <div class="grid-2">
+        <div>
+          <label class="label">Competition</label>
+          <select id="r-prompt"></select>
+        </div>
+        <div>
+          <label class="label">Dataset</label>
+          <select id="r-dataset"></select>
+        </div>
+        <div>
+          <label class="label">Provider</label>
+          <select id="r-provider">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Gemini</option>
+            <option value="ollama">Ollama (local)</option>
+            <option value="lmstudio">LM Studio (local)</option>
+          </select>
+        </div>
+        <div>
+          <label class="label">Model
+            <button type="button" class="link-btn" id="refresh-models">refresh list</button>
+            <span class="muted small" id="models-count"></span>
+          </label>
+          <select id="r-model-select" size="1">
+            <option value="">— select a model —</option>
+          </select>
+          <input id="r-model" type="text" placeholder="or type a custom model id" style="margin-top:6px" />
+        </div>
+        <div id="apikey-block">
+          <label class="label">API key for this run <span id="apikey-hint" class="muted small"></span></label>
+          <input id="r-apikey" type="password" placeholder="paste your key here" autocomplete="off" />
+          <div class="muted small" id="apikey-help" style="margin-top:4px"></div>
+        </div>
+        <div id="baseurl-block" class="hidden">
+          <label class="label">Base URL</label>
+          <input id="r-baseurl" type="text" />
+        </div>
+        <div>
+          <label class="label">Max rows (optional)</label>
+          <input id="r-maxrows" type="number" min="1" placeholder="all" value="50" />
+          <label class="small muted" style="display:flex;align-items:center;gap:6px;margin-top:6px">
+            <input type="checkbox" id="r-randsample" checked style="width:auto" /> random sample (seed=42)
+          </label>
+        </div>
+        <div>
+          <label class="label">Pricing override per Mtok (in / out)</label>
+          <div class="row">
+            <input id="r-pricein" type="number" step="0.01" placeholder="auto" />
+            <input id="r-priceout" type="number" step="0.01" placeholder="auto" />
+          </div>
+        </div>
+      </div>
+      <div class="row-end">
+        <button class="btn" onclick="startRun()">Start benchmark</button>
+      </div>
+    </div>
+
+    <div id="live-runs" class="hidden"></div>
+    <div id="active-run" class="hidden card"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
