@@ -225,6 +225,13 @@ def add_row_result(run_id: int, row_idx: int, latency_ms: float, input_tokens: i
         )
 
 
+def get_run_status(run_id: int) -> Optional[str]:
+    """Cheap status-only read — used by the runner to detect external cancellation."""
+    with _conn() as c:
+        r = c.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        return r["status"] if r else None
+
+
 def get_run(run_id: int) -> dict | None:
     with _conn() as c:
         r = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()

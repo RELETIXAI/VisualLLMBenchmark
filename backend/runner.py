@@ -85,6 +85,13 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
             if controls["cancelled"]:
                 db.update_run(run_id, status="cancelled", finished_at=time.time())
                 return
+            # Defensive: another process may have flipped our status (e.g. orphan
+            # sweep from a second uvicorn that briefly imported backend.main).
+            # If the DB says we're not live anymore, exit cleanly without hammering
+            # the provider further.
+            db_status = db.get_run_status(run_id)
+            if db_status not in ("running", "paused", "pending"):
+                return
 
             res = provider.run(
                 system_prompt=system_prompt,

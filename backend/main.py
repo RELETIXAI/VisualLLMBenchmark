@@ -31,10 +31,24 @@ FRONTEND_DIR = ROOT / "frontend"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-db.init_db()
-
 app = FastAPI(title="Reletix LLM Benchmark", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.on_event("startup")
+def _startup_init_db() -> None:
+    """Run init_db (incl. orphan-sweep) AFTER the port has been bound.
+
+    Earlier behaviour was to call db.init_db() at module import. That ran
+    on every uvicorn that imported the module — including a second uvicorn
+    that briefly started, ran the orphan-sweep, then failed to bind the
+    port. The result: a stale uvicorn's runner threads kept hammering the
+    provider while the DB said the runs were cancelled.
+
+    Running init_db here means a uvicorn that fails to bind never gets
+    to corrupt DB state.
+    """
+    db.init_db()
 
 
 # ---------- schemas ----------
