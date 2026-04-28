@@ -94,6 +94,25 @@ document.addEventListener("keydown", (e) => {
 let META = null;
 let CACHE = { prompts: [], datasets: [] };
 
+// ----- theme toggle -----
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  const btn = document.getElementById("theme-toggle");
+  if (btn) btn.textContent = (t === "dark") ? "☀" : "☾";
+  try { localStorage.setItem("reletix:theme", t); } catch (e) {}
+}
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute("data-theme") || "light";
+  applyTheme(cur === "dark" ? "light" : "dark");
+}
+(function initTheme() {
+  const t = (() => { try { return localStorage.getItem("reletix:theme"); } catch { return null; } })() || "light";
+  applyTheme(t);
+  document.addEventListener("click", (e) => {
+    if (e.target && e.target.id === "theme-toggle") toggleTheme();
+  });
+})();
+
 // ----- tabs -----
 $$(".tab").forEach(t => t.onclick = () => switchTab(t.dataset.tab));
 function switchTab(name) {

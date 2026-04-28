@@ -10,11 +10,23 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="/style.css" />
+<script>
+  // Apply theme before paint to avoid flash
+  (function() {
+    try {
+      var t = localStorage.getItem("reletix:theme") || "light";
+      document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  })();
+</script>
 </head>
 <body>
 <header class="topbar">
   <div class="brand">
-    <div class="logo"><img src="/assets/logo.png" alt="Reletix AI" /></div>
+    <div class="logo">
+      <img class="logo-light" src="/assets/logo.png"      alt="Reletix AI" />
+      <img class="logo-dark"  src="/assets/logo-dark.png" alt="Reletix AI" />
+    </div>
     <div>
       <div class="brand-name">R E L E T I X &nbsp;A I</div>
       <div class="brand-sub">Visual LLM Benchmark</div>
@@ -27,6 +39,7 @@
     <button data-tab="runs" class="tab">Runs</button>
     <button data-tab="benchmark" class="tab">Run benchmark</button>
     <a class="tab" href="/docs" target="_blank" rel="noopener">API ↗</a>
+    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">☾</button>
   </nav>
 </header>
 
