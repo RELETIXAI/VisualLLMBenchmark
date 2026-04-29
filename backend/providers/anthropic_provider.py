@@ -25,7 +25,10 @@ class AnthropicProvider(BaseProvider):
             content.append({"type": "text", "text": user_prompt})
             resp = client.messages.create(
                 model=model_id,
-                max_tokens=1024,
+                # 4096 keeps room for a full schema response with ~10 ingredients
+                # (each ingredient ~150 output tokens incl. all nutrition fields).
+                # Was 1024, which truncated complex meals mid-JSON.
+                max_tokens=4096,
                 system=system_prompt,
                 messages=[{"role": "user", "content": content}],
             )

@@ -42,17 +42,28 @@ def load_image_b64(path_or_url: str | None, image_url: str | None = None) -> tup
 
 
 def parse_json_loose(text: str) -> dict:
-    """Extract JSON object from possibly-fenced or chatty model output."""
+    """Extract JSON object from possibly-fenced or chatty model output.
+
+    Robust to truncation: if the response was cut off mid-string (Anthropic
+    hitting max_tokens, Ollama timeout, etc.), walks back to the last safe
+    boundary, closes any open brackets, and parses the partial result so we
+    don't drop a row that's 90% valid.
+    """
     if not text:
         return {}
-    # Strip code fences
+    # 1. Strip code fences
     fence = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
     if fence:
         try:
             return json.loads(fence.group(1))
         except Exception:
             pass
-    # First {...} balanced object
+    # 2. Try whole text
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    # 3. Try the first balanced {...}
     depth = 0
     start = -1
     for i, ch in enumerate(text):
@@ -67,8 +78,86 @@ def parse_json_loose(text: str) -> dict:
                     return json.loads(text[start:i + 1])
                 except Exception:
                     start = -1
+                    break
+    # 4. SALVAGE truncated JSON
+    return _salvage_truncated_json(text)
+
+
+def _salvage_truncated_json(text: str) -> dict:
+    """Recover as much structure as possible from truncated JSON.
+
+    Walk forward tracking quote/bracket state. Remember the last position where
+    the JSON was 'safe to cut' — i.e. just after a complete key:value pair at
+    the top object. Truncate there, close open brackets, parse.
+    """
+    start = text.find("{")
+    if start < 0:
+        return {}
+    s = text[start:]
+
+    in_str = False
+    escape = False
+    obj_stack: list[int] = []   # indexes of '{' positions
+    arr_stack: list[int] = []   # indexes of '[' positions
+    last_safe_cut = -1          # index just AFTER a top-level complete pair
+
+    for i, ch in enumerate(s):
+        if escape:
+            escape = False
+            continue
+        if in_str:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            obj_stack.append(i)
+        elif ch == "}":
+            if obj_stack:
+                obj_stack.pop()
+            if not obj_stack and not arr_stack:
+                # Whole document closed
+                try:
+                    return json.loads(s[: i + 1])
+                except Exception:
+                    pass
+        elif ch == "[":
+            arr_stack.append(i)
+        elif ch == "]":
+            if arr_stack:
+                arr_stack.pop()
+        elif ch == "," and len(obj_stack) == 1 and not arr_stack:
+            # comma at the root object level — safe truncation point
+            last_safe_cut = i
+
+    if last_safe_cut <= 0:
+        return {}
+
+    # Truncate at the last safe comma and close open structures
+    candidate = s[:last_safe_cut]
+    # Replay state for the truncated candidate to figure out close requirements
+    in_str = escape = False
+    o_open = a_open = 0
+    for ch in candidate:
+        if escape: escape = False; continue
+        if in_str:
+            if ch == "\\": escape = True
+            elif ch == '"': in_str = False
+            continue
+        if ch == '"': in_str = True; continue
+        if ch == "{": o_open += 1
+        elif ch == "}": o_open -= 1
+        elif ch == "[": a_open += 1
+        elif ch == "]": a_open -= 1
+    if in_str:
+        return {}  # truncation landed mid-string in our candidate, give up
+    closes = "]" * a_open + "}" * o_open
     try:
-        return json.loads(text)
+        return json.loads(candidate + closes)
     except Exception:
         return {}
 
