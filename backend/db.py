@@ -585,6 +585,65 @@ def restore_dataset_to_version(dataset_id: int, target_version: int,
             "n_changed": n_changed}
 
 
+def get_row_result(run_id: int, row_idx: int) -> Optional[dict]:
+    with _conn() as c:
+        r = c.execute(
+            "SELECT * FROM row_results WHERE run_id=? AND row_idx=?",
+            (run_id, row_idx)).fetchone()
+        return dict(r) if r else None
+
+
+def upsert_row_result(run_id: int, row_idx: int, latency_ms: float, input_tokens: int,
+                      output_tokens: int, cost_usd: float, output_text: str,
+                      output_parsed: dict, scores: dict, error: Optional[str],
+                      image_ref: Optional[str] = None, truth: Optional[dict] = None) -> None:
+    existing = get_row_result(run_id, row_idx)
+    if existing:
+        with _conn() as c:
+            c.execute("""
+                UPDATE row_results SET latency_ms=?, input_tokens=?, output_tokens=?,
+                    cost_usd=?, output_text=?, output_parsed=?, scores=?, error=?,
+                    image_ref=?, truth=?
+                WHERE run_id=? AND row_idx=?
+            """, (latency_ms, input_tokens, output_tokens, cost_usd,
+                  output_text, json.dumps(output_parsed), json.dumps(scores), error,
+                  image_ref, json.dumps(truth) if truth is not None else None,
+                  run_id, row_idx))
+    else:
+        add_row_result(run_id, row_idx, latency_ms=latency_ms, input_tokens=input_tokens,
+                       output_tokens=output_tokens, cost_usd=cost_usd, output_text=output_text,
+                       output_parsed=output_parsed, scores=scores, error=error,
+                       image_ref=image_ref, truth=truth)
+
+
+def recalc_run_stats(run_id: int) -> None:
+    """Recompute run-level aggregates from all row_results (used after single-row retry)."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT latency_ms, scores, input_tokens, output_tokens, cost_usd, error "
+            "FROM row_results WHERE run_id=?", (run_id,)).fetchall()
+    if not rows:
+        return
+    latencies, accs = [], []
+    total_in = total_out = 0
+    total_cost = 0.0
+    for row in rows:
+        sc = json.loads(row["scores"] or "{}")
+        if not row["error"]:
+            latencies.append(row["latency_ms"] or 0)
+            accs.append(sc.get("overall", 0))
+        total_in += row["input_tokens"] or 0
+        total_out += row["output_tokens"] or 0
+        total_cost += row["cost_usd"] or 0.0
+    avg_lat = sum(latencies) / len(latencies) if latencies else 0
+    acc = sum(accs) / len(accs) if accs else 0
+    from .scoring import composite_score
+    comp = composite_score(acc, avg_lat, total_cost, None)
+    update_run(run_id, accuracy=acc, avg_latency_ms=avg_lat, n_done=len(rows),
+               total_input_tokens=total_in, total_output_tokens=total_out,
+               total_cost_usd=total_cost, composite_score=comp)
+
+
 def leaderboard(prompt_id: int) -> list[dict]:
     """Best run per (provider, model) for this prompt, sorted by composite_score."""
     with _conn() as c:

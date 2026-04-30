@@ -817,6 +817,15 @@ optgroup { font-style: normal; font-weight: 600; color: var(--muted); }
   border: 1px dashed var(--hairline-strong);
   border-radius: var(--radius-2);
 }
+.retry-bar {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 14px; padding: 8px 12px;
+  background: var(--paper); border-radius: var(--radius-2);
+  border: 1px solid var(--hairline);
+}
+.btn-retry { color: var(--copper-deep); border-color: var(--copper-mid); font-size: 12px; }
+.btn-retry:hover { background: var(--copper-wash); border-color: var(--copper-deep); }
+.btn-retry:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* =====================================================================
    Modal (truth editor — same look as run drawer, sized for forms)

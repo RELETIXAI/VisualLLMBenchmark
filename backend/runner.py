@@ -1,6 +1,8 @@
 """Benchmark runner with pause/resume/cancel controls."""
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 import traceback
@@ -11,6 +13,12 @@ from .parser import parse_dataset
 from .pricing import cost_usd
 from .providers import get_provider
 from .scoring import score_row, composite_score
+
+_ENV_KEY_MAP = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
+}
 
 
 # In-memory control state per run.  Lives only as long as the process —
@@ -170,7 +178,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
     pinned_version = db.current_dataset_version(dataset_id)
     config = {"user_prompt": user_prompt, "pricing_override": pricing_override,
               "weights": weights, "max_rows": max_rows, "base_url": base_url,
-              "random_sample": random_sample, "pinned_version": pinned_version}
+              "random_sample": random_sample, "pinned_version": pinned_version,
+              "api_key": api_key}
     run_id = db.create_run(prompt_id=prompt_id, dataset_id=dataset_id,
                            provider=provider_name, model_id=model_id, n_rows=n, config=config)
     # Stamp dataset_version on the run row
@@ -193,3 +202,73 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
     )
     th.start()
     return run_id
+
+
+def retry_row(run_id: int, row_idx: int, api_key: str | None = None,
+              base_url: str | None = None) -> dict:
+    """Re-run a single row and update its result in-place. Blocking call."""
+    run = db.get_run(run_id)
+    if not run:
+        raise ValueError(f"Run {run_id} not found")
+
+    config = json.loads(run.get("config") or "{}")
+    dataset = db.get_dataset(run["dataset_id"])
+    prompt = db.get_prompt(run["prompt_id"])
+    if not dataset or not prompt:
+        raise ValueError("Dataset or prompt not found")
+
+    # API key priority: explicit arg > stored in config > environment variable
+    resolved_key = (api_key
+                    or config.get("api_key")
+                    or os.environ.get(_ENV_KEY_MAP.get(run["provider"], ""), None))
+    resolved_base = base_url or config.get("base_url")
+
+    ds = parse_dataset(dataset["file_path"],
+                       image_url_template=dataset.get("image_url_template"),
+                       dataset_id=dataset["id"])
+
+    target_row = next((r for r in ds["rows"] if r["row_idx"] == row_idx), None)
+    if target_row is None:
+        raise ValueError(f"Row idx {row_idx} not found in dataset")
+
+    provider = get_provider(run["provider"], api_key=resolved_key, base_url=resolved_base)
+
+    res = provider.run(
+        system_prompt=prompt["system_prompt"],
+        image_path=target_row.get("image_path"),
+        image_url=target_row.get("image_url"),
+        model_id=run["model_id"],
+        user_prompt=config.get("user_prompt"),
+    )
+
+    scores = score_row(res.parsed, target_row) if not res.error else {
+        "food_sim": 0, "desc_sim": 0, "nutrition_per": {}, "macros_avg": 0,
+        "ingredient_f1": 0, "weight_acc": 0, "overall": 0,
+        "ingredients": {"matches": [], "unmatched_truth": [], "unmatched_pred": [],
+                        "n_pred": 0, "n_truth": 0, "matched": 0,
+                        "precision": 0, "recall": 0, "f1": 0, "weight_acc": 0},
+        "health": {"score": None, "pred": None, "truth": None, "delta": None}
+    }
+
+    row_cost = cost_usd(res.input_tokens, res.output_tokens, run["model_id"],
+                        run["provider"], config.get("pricing_override"))
+    image_ref = target_row.get("image_url") or target_row.get("image_path") or target_row.get("image_id")
+    truth_payload = {
+        "food": target_row.get("food"),
+        "description": target_row.get("description"),
+        "nutrition": target_row.get("nutrition_truth"),
+        "ingredients": target_row.get("ingredients_truth") or [],
+        "health_score": target_row.get("health_score_truth"),
+    }
+
+    db.upsert_row_result(
+        run_id=run_id, row_idx=row_idx,
+        latency_ms=res.latency_ms, input_tokens=res.input_tokens,
+        output_tokens=res.output_tokens, cost_usd=row_cost,
+        output_text=res.text, output_parsed=res.parsed, scores=scores,
+        error=res.error, image_ref=image_ref, truth=truth_payload,
+    )
+
+    db.recalc_run_stats(run_id)
+
+    return db.get_row_result(run_id, row_idx)

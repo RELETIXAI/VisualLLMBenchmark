@@ -40,6 +40,10 @@ const api = {
   dsVersions:  (id)    => fetch(`/api/datasets/${id}/versions`).then(r => r.json()),
   imageHistory:(dsId, imageId) => fetch(`/api/datasets/${dsId}/image/${encodeURIComponent(imageId)}/history`).then(r => r.json()),
   restoreDs:   (id, body) => fetch(`/api/datasets/${id}/restore`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)}).then(r => r.json()),
+  retryRow:    (runId, rowIdx, apiKey, baseUrl) => fetch(`/api/runs/${runId}/rows/${rowIdx}/retry`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({api_key: apiKey||null, base_url: baseUrl||null})
+  }).then(r => r.json()),
 };
 
 const LB = { selected: new Set(), filters: {provider:"", model_id:"", prompt_id:"", dataset_id:"", status:""}, bestOnly: false, runs: [] };
@@ -1952,6 +1956,50 @@ async function rescoreAllForDataset(datasetId) {
   return r;
 }
 
+async function retryRowEntry(runId, rowIdx) {
+  const btnId = `retry-btn-${rowIdx}`;
+  const statusId = `retry-status-${rowIdx}`;
+  const btn = document.getElementById(btnId);
+  const statusEl = document.getElementById(statusId);
+  if (btn) { btn.disabled = true; btn.textContent = "↺ Retrying…"; }
+  if (statusEl) statusEl.textContent = "";
+
+  try {
+    const result = await api.retryRow(runId, rowIdx, null, null);
+    if (result && result.detail) throw new Error(result.detail);
+
+    toast(`Row ${rowIdx} retried successfully`);
+
+    // Re-render just this row card in place
+    const cardHead = document.querySelector(`.row-card-head[data-row-idx="${rowIdx}"]`);
+    if (cardHead) {
+      const card = cardHead.closest(".row-card");
+      if (card) {
+        // Determine which state/opts context we're in
+        const isActiveRun = !!card.closest("#active-run");
+        const state    = isActiveRun ? ACTIVE : REVIEW;
+        const runIdCtx = isActiveRun ? ACTIVE.runId : REVIEW.runId;
+        const dsId     = isActiveRun ? null : REVIEW.datasetId;
+        const modelId  = isActiveRun ? ACTIVE.model_id : REVIEW.model_id;
+        // Keep the row expanded
+        state.expandedRows.add(rowIdx);
+        const newHtml = renderRowCard(result, {
+          state, modelId, runId: runIdCtx, datasetId: dsId,
+          toggleFn: isActiveRun ? (idx => toggleRow(idx)) : (idx => toggleReviewRow(idx)),
+        });
+        card.outerHTML = newHtml;
+      }
+    }
+    // Also refresh run-level stats in header if visible
+    if (REVIEW.runId === runId && typeof renderRunDrawerHeader === "function") renderRunDrawerHeader();
+    if (ACTIVE.runId === runId) pollRunOnce();
+  } catch(e) {
+    if (statusEl) statusEl.textContent = "Error: " + e.message;
+    toast("Retry failed: " + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = "↺ Retry"; }
+  }
+}
+
 function offerRescoreAfterCorrection(datasetId, runId) {
   // Quick prompt — minimal friction
   const yes = confirm(
@@ -2136,6 +2184,11 @@ function renderRowCard(rr, opts) {
             </div>
             ${ingTable}
           `}
+          <div class="retry-bar">
+            <button class="btn-ghost btn-retry" id="retry-btn-${rr.row_idx}"
+                    onclick="retryRowEntry(${runId}, ${rr.row_idx})">↺ Retry this row</button>
+            <span class="muted small" id="retry-status-${rr.row_idx}"></span>
+          </div>
           ${renderPromoteToTruth(rr, runId, datasetId)}
           <details style="margin-top:14px" ${state.rawExpanded.has(rr.row_idx) ? "open" : ""}
                    ontoggle="onRawToggle(event, ${rr.row_idx})">

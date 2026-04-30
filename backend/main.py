@@ -488,6 +488,32 @@ def rescore_all_runs_for_dataset(dataset_id: int):
     return {"rescored_runs": summaries, "n": len(summaries)}
 
 
+class RetryRowIn(BaseModel):
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+@app.post("/api/runs/{run_id}/rows/{row_idx}/retry")
+def retry_row(run_id: int, row_idx: int, body: RetryRowIn = RetryRowIn()):
+    """Re-run a single row and update its result in-place.
+    Works on completed, failed, or cancelled runs.
+    The run status is NOT changed; only the row result and run aggregates are updated."""
+    run = db.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(runner.retry_row, run_id, row_idx,
+                          body.api_key, body.base_url)
+        try:
+            result = fut.result(timeout=120)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(500, f"Retry failed: {e}")
+    return result
+
+
 @app.delete("/api/runs/{run_id}")
 def delete_run(run_id: int):
     """Delete a single run (and its row results).  If the run is still
