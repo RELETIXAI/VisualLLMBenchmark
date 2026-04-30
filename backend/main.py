@@ -322,6 +322,124 @@ def cancel_run(run_id: int):
     return {"ok": runner.cancel_run(run_id)}
 
 
+@app.post("/api/runs/{run_id}/rescore")
+def rescore_run(run_id: int):
+    """Recompute scores for an existing run against the current truth + any
+    corrections, WITHOUT re-calling the provider. Useful after promoting a
+    prediction to truth, fixing a wrong benchmark, or tuning the scoring
+    function: the model's stored output stays put, only the comparison
+    against truth is redone.
+    """
+    import sqlite3
+    from .scoring import score_row, composite_score
+    run = db.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    dataset = db.get_dataset(run["dataset_id"])
+    if not dataset:
+        raise HTTPException(404, "Dataset for this run was deleted")
+
+    parsed = parse_dataset(dataset["file_path"],
+                           images_dir=IMAGES_DIR,
+                           image_url_template=dataset.get("image_url_template"),
+                           dataset_id=dataset["id"])
+    truth_by_idx = {r["row_idx"]: r for r in parsed["rows"]}
+
+    n_changed = 0
+    affected_rows = []
+    with sqlite3.connect(db.DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM row_results WHERE run_id=? ORDER BY row_idx",
+            (run_id,)).fetchall()
+        for r in rows:
+            if r["error"]:
+                continue
+            truth_row = truth_by_idx.get(r["row_idx"])
+            if not truth_row:
+                continue
+            try:
+                pred = _json.loads(r["output_parsed"] or "{}")
+            except Exception:
+                pred = {}
+            new_scores = score_row(pred, truth_row)
+            old_scores = _json.loads(r["scores"] or "{}")
+            old_overall = (old_scores or {}).get("overall") or 0
+            new_overall = (new_scores or {}).get("overall") or 0
+            # Always update truth (corrections may have changed it)
+            new_truth_payload = {
+                "food": truth_row.get("food"),
+                "description": truth_row.get("description"),
+                "nutrition": truth_row.get("nutrition_truth"),
+                "ingredients": truth_row.get("ingredients_truth") or [],
+                "health_score": truth_row.get("health_score_truth"),
+            }
+            conn.execute(
+                "UPDATE row_results SET scores=?, truth=?, output_parsed=? WHERE id=?",
+                (_json.dumps(new_scores), _json.dumps(new_truth_payload),
+                 _json.dumps(pred), r["id"]))
+            if abs(new_overall - old_overall) > 1e-6:
+                n_changed += 1
+                affected_rows.append({"row_idx": r["row_idx"],
+                                       "old": round(old_overall, 4),
+                                       "new": round(new_overall, 4)})
+        conn.commit()
+
+    # Recompute aggregate
+    with sqlite3.connect(db.DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM row_results WHERE run_id=? ORDER BY row_idx",
+            (run_id,)).fetchall()
+        total_in = total_out = 0
+        total_cost = 0.0
+        accs, lats = [], []
+        for r in rows:
+            sc = _json.loads(r["scores"] or "{}")
+            total_in += r["input_tokens"] or 0
+            total_out += r["output_tokens"] or 0
+            total_cost += r["cost_usd"] or 0
+            if not r["error"]:
+                accs.append(sc.get("overall") or 0)
+                lats.append(r["latency_ms"] or 0)
+        accuracy = sum(accs)/len(accs) if accs else 0
+        avg_lat  = sum(lats)/len(lats) if lats else 0
+        comp = composite_score(accuracy, avg_lat, total_cost)
+    db.update_run(run_id,
+                  accuracy=accuracy, avg_latency_ms=avg_lat,
+                  total_input_tokens=total_in, total_output_tokens=total_out,
+                  total_cost_usd=total_cost, composite_score=comp)
+    new_run = db.get_run(run_id)
+    return {
+        "rescored": True,
+        "rows_changed": n_changed,
+        "n_corrections_applied": parsed.get("n_corrected", 0),
+        "accuracy_before": (run.get("accuracy") or 0),
+        "accuracy_after": new_run.get("accuracy"),
+        "composite_before": run.get("composite_score") or 0,
+        "composite_after": new_run.get("composite_score"),
+        "affected_rows": affected_rows[:50],
+    }
+
+
+@app.post("/api/datasets/{dataset_id}/rescore_all")
+def rescore_all_runs_for_dataset(dataset_id: int):
+    """Bulk re-score every completed run against this dataset. Use after
+    saving multiple corrections to bring the leaderboard up to date.
+    """
+    runs = db.list_runs(dataset_id=dataset_id, status="completed")
+    summaries = []
+    for r in runs:
+        try:
+            res = rescore_run(r["id"])
+            summaries.append({"run_id": r["id"], **{k: res[k] for k in
+                ("rows_changed","accuracy_before","accuracy_after",
+                 "composite_before","composite_after")}})
+        except HTTPException as e:
+            summaries.append({"run_id": r["id"], "error": e.detail})
+    return {"rescored_runs": summaries, "n": len(summaries)}
+
+
 @app.delete("/api/runs/{run_id}")
 def delete_run(run_id: int):
     """Delete a single run (and its row results).  If the run is still

@@ -818,6 +818,116 @@ optgroup { font-style: normal; font-weight: 600; color: var(--muted); }
   border-radius: var(--radius-2);
 }
 
+/* =====================================================================
+   Modal (truth editor — same look as run drawer, sized for forms)
+   ===================================================================== */
+.modal {
+  position: fixed; inset: 0; z-index: 1100;
+  display: flex; align-items: center; justify-content: center;
+  animation: fade var(--t-fast) var(--ease);
+}
+.modal.hidden { display: none; }
+.modal-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(15, 14, 11, 0.45);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  cursor: zoom-out;
+}
+.modal-panel {
+  position: relative; z-index: 1;
+  width: min(820px, 96vw); max-height: 92vh;
+  background: var(--canvas);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-3);
+  box-shadow: 0 24px 60px -12px rgba(0,0,0,0.30);
+  display: flex; flex-direction: column;
+  animation: pop var(--t-base) var(--ease);
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--card);
+  border-radius: var(--radius-3) var(--radius-3) 0 0;
+}
+.modal-head h3 {
+  font-family: var(--serif); font-weight: 500;
+  font-size: 18px; letter-spacing: -0.01em;
+}
+.modal-body {
+  padding: 18px 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+.modal-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--hairline);
+  background: var(--card);
+  border-radius: 0 0 var(--radius-3) var(--radius-3);
+}
+
+/* Truth-editor specifics */
+.te-grid {
+  display: grid; grid-template-columns: 220px 1fr; gap: 18px;
+}
+@media (max-width: 640px) { .te-grid { grid-template-columns: 1fr; } }
+.te-image {
+  width: 100%; aspect-ratio: 1 / 1; object-fit: cover;
+  border-radius: var(--radius-2); border: 1px solid var(--hairline);
+  background: var(--paper-2);
+}
+.te-image-empty {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 12px;
+}
+.te-form-col { display: flex; flex-direction: column; }
+
+.te-grade {
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.te-grade-opt {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 32px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-1);
+  background: var(--card);
+  font-family: var(--mono); font-size: 13px; font-weight: 600;
+  color: var(--ink-2);
+  cursor: pointer; transition: all var(--t-fast) var(--ease);
+}
+.te-grade-opt input { display: none; }
+.te-grade-opt:hover { border-color: var(--copper); color: var(--copper-deep); }
+.te-grade-opt.active {
+  background: var(--copper); border-color: var(--copper-deep); color: #fff;
+}
+
+.te-macros {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px 10px;
+}
+.te-macro-cell .label { margin-top: 0; }
+.te-macro-cell input { padding: 6px 9px; }
+
+.te-ing {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-2);
+  background: var(--paper);
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.te-ing-head {
+  display: grid; grid-template-columns: 1fr 90px 70px 32px 32px;
+  gap: 6px; align-items: center;
+}
+.te-ing-head input, .te-ing-head select { padding: 6px 9px; }
+.te-ing-detail {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px 8px; margin-top: 8px;
+  padding-top: 8px; border-top: 1px dashed var(--hairline-strong);
+}
+.te-ing-detail .label { margin-top: 0; font-size: 9.5px; }
+
 /* Drawer (full-screen run detail when clicking from leaderboard) */
 .run-drawer {
   position: fixed; inset: 0; z-index: 900;

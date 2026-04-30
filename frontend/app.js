@@ -971,8 +971,11 @@ function renderReviewBody(r) {
   return `
     <div class="card" style="margin-bottom:12px">
       ${r.error ? `<div class="error-box">${escape(r.error)}</div>` : ""}
-      <div class="muted small" style="margin-bottom:10px">
-        ${escape(r.prompt_name||"")} · ${escape(r.provider)} · ${r.n_done}/${r.n_rows} rows · ${(r.avg_latency_ms/1000||0).toFixed(2)}s/row · ${fmtNum(r.total_input_tokens)} in / ${fmtNum(r.total_output_tokens)} out
+      <div class="row-between" style="align-items:center;margin-bottom:8px">
+        <div class="muted small">
+          ${escape(r.prompt_name||"")} · ${escape(r.provider)} · ${r.n_done}/${r.n_rows} rows · ${(r.avg_latency_ms/1000||0).toFixed(2)}s/row · ${fmtNum(r.total_input_tokens)} in / ${fmtNum(r.total_output_tokens)} out
+        </div>
+        <button class="btn-ghost" onclick="rescoreRun(${r.id})" title="Recompute scores against the latest truth + corrections (no model calls)">↻ Re-score</button>
       </div>
       ${renderReviewStats(r)}
     </div>
@@ -1368,52 +1371,353 @@ function renderPromoteToTruth(rr, runId, datasetId) {
     </div>`;
 }
 
+// =====================================================================
+// Truth editor — modal form. Same look as the rest of the tool.
+// =====================================================================
+const TRUTH_EDIT = { datasetId: null, imageId: null, runId: null, rowIdx: null,
+                     truth: null, pred: null, imageUrl: null };
+const NUTRIENT_KEYS = ["calories","protein_g","carbs_g","fat_g","fiber_g","sugar_g","sodium_mg"];
+const ING_NUTRIENT_KEYS = ["calories","protein","carbohydrates","fat","sodium","sugar","fiber"];
+const HEALTH_GRADES = ["A","B","C","D","E"];
+
 async function promoteToTruth(rowResultId, runId, datasetId, imageId, mode) {
-  // Fetch the row's parsed output to use as the new truth payload
   const run = await api.run(runId);
   const rr = (run.rows || []).find(x => x.id === rowResultId);
   if (!rr) return toast("Row not found.");
-  const op = JSON.parse(rr.output_parsed || "{}");
-  let payload = {
-    food: op.food || null,
-    description: op.description || null,
-    nutrition: op.nutrition || {},
-    ingredients: op.ingredients || [],
-    health_score: op.health_score || null,
-  };
-  let note = `Promoted from run #${runId} row ${rr.row_idx}`;
+  const op    = JSON.parse(rr.output_parsed || "{}");
+  const truth = JSON.parse(rr.truth || "{}");
+  const ref   = rr.image_ref || "";
+  const imageUrl = ref.startsWith("http") ? ref : (ref ? `/images/${ref.split("/").pop()}` : null);
 
-  if (mode === "edit") {
-    // Open a simple JSON editor in a prompt-style dialog
-    const cur = JSON.stringify(payload, null, 2);
-    const edited = prompt(
-      "Edit the truth JSON for this row. The keys here MUST stay as-is.\n" +
-      "(food, description, nutrition, ingredients, health_score)",
-      cur
-    );
-    if (edited === null) return;
-    try { payload = JSON.parse(edited); } catch (e) {
-      return toast("Invalid JSON: " + e.message);
-    }
-    note = "Edited manually";
-  }
+  TRUTH_EDIT.datasetId = datasetId;
+  TRUTH_EDIT.imageId   = imageId;
+  TRUTH_EDIT.runId     = runId;
+  TRUTH_EDIT.rowIdx    = rr.row_idx;
+  TRUTH_EDIT.pred      = op;
+  TRUTH_EDIT.truth     = JSON.parse(JSON.stringify(truth));
+  TRUTH_EDIT.imageUrl  = imageUrl;
 
-  const status = document.getElementById(`promote-status-${rr.row_idx}`);
-  if (status) status.textContent = "saving…";
-  try {
+  if (mode === "pred") {
+    // Fast-path: directly save the model's prediction as the truth, no editor.
+    const payload = {
+      food: op.food || null,
+      description: op.description || null,
+      nutrition: op.nutrition || {},
+      ingredients: op.ingredients || [],
+      health_score: op.health_score || null,
+    };
+    const status = document.getElementById(`promote-status-${rr.row_idx}`);
+    if (status) status.textContent = "saving…";
     const res = await api.saveCorrection({
-      dataset_id: datasetId,
-      image_id: imageId,
-      truth: payload,
-      source_run_id: runId,
-      source_row_idx: rr.row_idx,
-      note,
+      dataset_id: datasetId, image_id: imageId, truth: payload,
+      source_run_id: runId, source_row_idx: rr.row_idx,
+      note: `Promoted from run #${runId} row ${rr.row_idx}`,
     });
     if (status) status.innerHTML = `<span class="pill ok">✓ saved (correction #${res.id})</span>`;
-    toast("Truth correction saved. Next run picks it up.");
-  } catch (e) {
-    if (status) status.textContent = "save failed: " + e.message;
+    toast("Truth correction saved.");
+    offerRescoreAfterCorrection(datasetId, runId);
+    return;
   }
+
+  // Full editor
+  openTruthEditor();
+}
+
+function openTruthEditor() {
+  // Seed the form with whatever truth the row has stored
+  const t = TRUTH_EDIT.truth || {};
+  const ings = (t.ingredients || []).map(i => normaliseIngredientForForm(i));
+  const formState = {
+    food: t.food || "",
+    description: t.description || "",
+    health_score: t.health_score || "",
+    nutrition: NUTRIENT_KEYS.reduce((o,k) => (o[k] = (t.nutrition||{})[k] ?? "", o), {}),
+    ingredients: ings.length ? ings : [emptyIngredient()],
+  };
+  TRUTH_EDIT._form = formState;
+  document.getElementById("te-subtitle").textContent =
+    `image ${TRUTH_EDIT.imageId.slice(0, 24)}…  · row ${TRUTH_EDIT.rowIdx}  · run #${TRUTH_EDIT.runId}`;
+  renderTruthEditorBody();
+  const m = document.getElementById("truth-editor");
+  m.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+}
+
+function closeTruthEditor() {
+  const m = document.getElementById("truth-editor");
+  if (m) m.classList.add("hidden");
+  document.body.style.overflow = "";
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.matches && e.target.matches(".modal-backdrop[data-close]")) {
+    closeTruthEditor();
+  }
+});
+
+function emptyIngredient() {
+  return {name:"", quantity:"", unit:"g",
+          calories:"", protein:"", carbohydrates:"", fat:"",
+          sodium:"", sugar:"", fiber:""};
+}
+
+function normaliseIngredientForForm(i) {
+  return {
+    name: i.name || "",
+    quantity: i.quantity ?? "",
+    unit: i.unit || "g",
+    // Truth ingredients use canonical (protein_g) — coerce to the WILLMA names the form uses
+    calories: i.calories ?? "",
+    protein: i.protein ?? i.protein_g ?? "",
+    carbohydrates: i.carbohydrates ?? i.carbs_g ?? "",
+    fat: i.fat ?? i.fat_g ?? "",
+    sodium: i.sodium ?? i.sodium_mg ?? "",
+    sugar: i.sugar ?? i.sugar_g ?? "",
+    fiber: i.fiber ?? i.fiber_g ?? "",
+  };
+}
+
+function renderTruthEditorBody() {
+  const f = TRUTH_EDIT._form;
+  const body = document.getElementById("te-body");
+  const imgHtml = TRUTH_EDIT.imageUrl
+    ? `<img class="te-image" src="${escape(TRUTH_EDIT.imageUrl)}" referrerpolicy="no-referrer" />`
+    : `<div class="te-image te-image-empty">no image</div>`;
+
+  body.innerHTML = `
+    <div class="te-grid">
+      ${imgHtml}
+      <div class="te-form-col">
+        <label class="label">Food name <span class="lbl-truth">truth</span></label>
+        <input id="te-food" type="text" value="${escape(f.food)}" />
+
+        <label class="label">Description</label>
+        <input id="te-desc" type="text" value="${escape(f.description)}" />
+
+        <label class="label">Health grade</label>
+        <div class="te-grade">
+          ${HEALTH_GRADES.map(g => `
+            <label class="te-grade-opt ${f.health_score === g ? "active" : ""}">
+              <input type="radio" name="te-health" value="${g}" ${f.health_score === g ? "checked":""} />
+              <span>${g}</span>
+            </label>
+          `).join("")}
+          <label class="te-grade-opt ${!f.health_score ? "active" : ""}">
+            <input type="radio" name="te-health" value="" ${!f.health_score ? "checked":""} />
+            <span>—</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <h4 class="rowcard-h" style="margin-top:18px">Nutrition (per serving)</h4>
+    <div class="te-macros">
+      ${NUTRIENT_KEYS.map(k => {
+        const unit = k === "calories" ? "kcal" : k.endsWith("_mg") ? "mg" : "g";
+        const lbl = k.replace("_g","").replace("_mg","");
+        return `
+          <div class="te-macro-cell">
+            <label class="label">${lbl} <span class="muted">(${unit})</span></label>
+            <input type="number" step="any" data-nut="${k}" value="${escape(f.nutrition[k])}" />
+          </div>`;
+      }).join("")}
+    </div>
+
+    <h4 class="rowcard-h" style="margin-top:18px;display:flex;justify-content:space-between;align-items:center">
+      <span>Ingredients <span class="muted small">(${f.ingredients.length})</span></span>
+      <button class="btn-ghost" type="button" onclick="teAddIngredient()">+ Add ingredient</button>
+    </h4>
+    <div id="te-ings">
+      ${f.ingredients.map((ing, i) => renderIngredientForm(ing, i)).join("")}
+    </div>
+  `;
+
+  // Wire up live updates
+  body.querySelector("#te-food").oninput = e => f.food = e.target.value;
+  body.querySelector("#te-desc").oninput = e => f.description = e.target.value;
+  body.querySelectorAll('input[name="te-health"]').forEach(r => {
+    r.onchange = e => {
+      f.health_score = e.target.value || null;
+      // Toggle "active" class
+      body.querySelectorAll('.te-grade-opt').forEach(el => el.classList.remove("active"));
+      r.closest(".te-grade-opt").classList.add("active");
+    };
+  });
+  body.querySelectorAll('[data-nut]').forEach(inp => {
+    inp.oninput = e => {
+      const v = e.target.value;
+      f.nutrition[inp.dataset.nut] = v === "" ? "" : parseFloat(v);
+    };
+  });
+  // Ingredient bindings
+  wireIngredientForms();
+}
+
+function renderIngredientForm(ing, i) {
+  return `
+    <div class="te-ing" data-i="${i}">
+      <div class="te-ing-head">
+        <input class="te-ing-name" type="text" placeholder="e.g. rice, white, cooked" value="${escape(ing.name)}" />
+        <input class="te-ing-qty num" type="number" step="any" placeholder="qty" value="${escape(ing.quantity)}" />
+        <select class="te-ing-unit">
+          <option ${ing.unit==="g"?"selected":""}>g</option>
+          <option ${ing.unit==="ml"?"selected":""}>ml</option>
+        </select>
+        <button class="btn-ghost" type="button" onclick="teToggleIngDetails(${i})" title="Per-ingredient nutrition">⌄</button>
+        <button class="btn-ghost btn-danger-text" type="button" onclick="teRemoveIngredient(${i})" title="Remove">×</button>
+      </div>
+      <div class="te-ing-detail hidden" id="te-ing-detail-${i}">
+        ${ING_NUTRIENT_KEYS.map(k => {
+          const lbl = ({calories:"kcal",protein:"protein g",carbohydrates:"carbs g",
+                        fat:"fat g",sodium:"sodium mg",sugar:"sugar g",fiber:"fiber g"})[k];
+          return `
+            <label class="label">${lbl}</label>
+            <input class="te-ing-${k} num" type="number" step="any" value="${escape(ing[k] ?? "")}" />
+          `;
+        }).join("")}
+      </div>
+    </div>`;
+}
+
+function wireIngredientForms() {
+  const f = TRUTH_EDIT._form;
+  document.querySelectorAll(".te-ing").forEach(el => {
+    const i = parseInt(el.dataset.i);
+    el.querySelector(".te-ing-name").oninput = e => f.ingredients[i].name = e.target.value;
+    el.querySelector(".te-ing-qty" ).oninput = e => f.ingredients[i].quantity = e.target.value === "" ? "" : parseFloat(e.target.value);
+    el.querySelector(".te-ing-unit").onchange= e => f.ingredients[i].unit = e.target.value;
+    ING_NUTRIENT_KEYS.forEach(k => {
+      const inp = el.querySelector(".te-ing-" + k);
+      if (inp) inp.oninput = e => f.ingredients[i][k] = e.target.value === "" ? "" : parseFloat(e.target.value);
+    });
+  });
+}
+
+function teToggleIngDetails(i) {
+  const el = document.getElementById(`te-ing-detail-${i}`);
+  if (el) el.classList.toggle("hidden");
+}
+
+function teAddIngredient() {
+  TRUTH_EDIT._form.ingredients.push(emptyIngredient());
+  renderTruthEditorBody();
+}
+
+function teRemoveIngredient(i) {
+  TRUTH_EDIT._form.ingredients.splice(i, 1);
+  if (!TRUTH_EDIT._form.ingredients.length) {
+    TRUTH_EDIT._form.ingredients.push(emptyIngredient());
+  }
+  renderTruthEditorBody();
+}
+
+function teFillFromPred() {
+  const op = TRUTH_EDIT.pred || {};
+  const f = {
+    food: op.food || "",
+    description: op.description || "",
+    health_score: op.health_score || "",
+    nutrition: NUTRIENT_KEYS.reduce((o,k) => (o[k] = (op.nutrition||{})[k] ?? "", o), {}),
+    ingredients: (op.ingredients || []).map(i => normaliseIngredientForForm(i)),
+  };
+  if (!f.ingredients.length) f.ingredients = [emptyIngredient()];
+  TRUTH_EDIT._form = f;
+  renderTruthEditorBody();
+  toast("Loaded model output into the form.");
+}
+
+async function teReset() {
+  if (!confirm("Remove the saved correction for this image and use the original Excel value?\n\nFuture runs will score against the source benchmark again.")) return;
+  // Find existing correction by listing
+  const list = await api.corrections(TRUTH_EDIT.datasetId);
+  const c = list.find(x => x.image_id === TRUTH_EDIT.imageId);
+  if (!c) { toast("No correction to remove."); return; }
+  await api.delCorrection(c.id);
+  toast("Correction removed.");
+  closeTruthEditor();
+  offerRescoreAfterCorrection(TRUTH_EDIT.datasetId, TRUTH_EDIT.runId);
+}
+
+async function teSave() {
+  const f = TRUTH_EDIT._form;
+  // Build canonical payload
+  const nutrition = {};
+  for (const k of NUTRIENT_KEYS) {
+    if (f.nutrition[k] !== "" && f.nutrition[k] != null && !isNaN(f.nutrition[k])) {
+      nutrition[k] = parseFloat(f.nutrition[k]);
+    }
+  }
+  const ingredients = f.ingredients
+    .filter(i => i.name && i.name.trim())
+    .map(i => {
+      const out = {name: i.name.trim(), unit: i.unit || "g"};
+      if (i.quantity !== "" && i.quantity != null) out.quantity = parseFloat(i.quantity);
+      for (const k of ING_NUTRIENT_KEYS) {
+        if (i[k] !== "" && i[k] != null && !isNaN(i[k])) out[k] = parseFloat(i[k]);
+      }
+      return out;
+    });
+  const payload = {
+    food: f.food.trim() || null,
+    description: f.description.trim() || null,
+    nutrition: nutrition,
+    ingredients: ingredients,
+    health_score: f.health_score || null,
+  };
+  try {
+    const res = await api.saveCorrection({
+      dataset_id: TRUTH_EDIT.datasetId,
+      image_id:   TRUTH_EDIT.imageId,
+      truth:      payload,
+      source_run_id:  TRUTH_EDIT.runId,
+      source_row_idx: TRUTH_EDIT.rowIdx,
+      note: "Edited via truth editor",
+    });
+    toast(`Correction saved (#${res.id}).`);
+    closeTruthEditor();
+    // Update the inline status pill
+    const status = document.getElementById(`promote-status-${TRUTH_EDIT.rowIdx}`);
+    if (status) status.innerHTML = `<span class="pill ok">✓ saved (correction #${res.id})</span>`;
+    offerRescoreAfterCorrection(TRUTH_EDIT.datasetId, TRUTH_EDIT.runId);
+  } catch (e) {
+    toast("Save failed: " + e.message);
+  }
+}
+
+// =====================================================================
+// Re-score plumbing (no API calls, just recompute scores from stored
+// predictions against the corrected truth).
+// =====================================================================
+async function rescoreRun(runId) {
+  toast(`Re-scoring run #${runId}…`);
+  const r = await fetch(`/api/runs/${runId}/rescore`, {method:"POST"}).then(r=>r.json());
+  toast(
+    `Run #${runId} re-scored · ${r.rows_changed} row${r.rows_changed===1?"":"s"} changed · ` +
+    `${(r.accuracy_before*100).toFixed(1)}% → ${(r.accuracy_after*100).toFixed(1)}%`
+  );
+  // Refresh the affected views
+  if (LB && typeof reloadLeaderboardTable === "function") reloadLeaderboardTable();
+  if (REVIEW.runId === runId) loadRunDrawer(runId);
+  return r;
+}
+
+async function rescoreAllForDataset(datasetId) {
+  toast("Re-scoring all runs against this dataset…");
+  const r = await fetch(`/api/datasets/${datasetId}/rescore_all`, {method:"POST"}).then(r=>r.json());
+  toast(`Re-scored ${r.n} run${r.n===1?"":"s"}.`);
+  if (typeof reloadLeaderboardTable === "function") reloadLeaderboardTable();
+  return r;
+}
+
+function offerRescoreAfterCorrection(datasetId, runId) {
+  // Quick prompt — minimal friction
+  const yes = confirm(
+    "Re-score the previous runs now so the leaderboard reflects the new truth?\n\n" +
+    "(This recomputes scores against the saved model outputs — no model API calls, free + fast.)\n\n" +
+    "Yes = re-score all runs against this dataset.\n" +
+    "No  = leave previous runs as they were; only future runs use the new truth."
+  );
+  if (yes) rescoreAllForDataset(datasetId);
 }
 
 function _pct(v) { return (v*100).toFixed(1)+"%"; }
