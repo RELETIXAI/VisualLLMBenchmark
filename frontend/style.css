@@ -569,6 +569,63 @@ table.cmp tbody tr:hover { background: transparent; }
   font-family: var(--mono);
 }
 .macro-table tbody tr:hover, .ing-table tbody tr:hover { background: var(--paper); }
+
+/* Truth vs model column tints — make it impossible to mix them up */
+.col-truth { background: rgba(122, 110, 92, 0.04); }
+.col-pred  { background: rgba(204, 120, 92, 0.06); }
+[data-theme="dark"] .col-truth { background: rgba(245, 241, 232, 0.03); }
+[data-theme="dark"] .col-pred  { background: rgba(214, 141, 111, 0.08); }
+.macro-table tbody tr:hover .col-truth { background: rgba(122, 110, 92, 0.07); }
+.macro-table tbody tr:hover .col-pred  { background: rgba(204, 120, 92, 0.10); }
+.ing-table tbody tr:hover .col-truth   { background: rgba(122, 110, 92, 0.07); }
+.ing-table tbody tr:hover .col-pred    { background: rgba(204, 120, 92, 0.10); }
+
+/* Headers spanning truth / pred columns */
+.ing-table th.th-truth {
+  color: var(--ink-2); border-bottom: 2px solid var(--hairline-strong);
+  background: rgba(122, 110, 92, 0.04);
+}
+.ing-table th.th-pred {
+  color: var(--copper-deep); border-bottom: 2px solid var(--copper);
+  background: rgba(204, 120, 92, 0.06);
+}
+.ing-table tr.ing-table-sub th {
+  font-size: 9.5px; padding-top: 4px; padding-bottom: 4px;
+}
+
+/* Inline truth/model labels (used in heads, health line, meal line) */
+.lbl-truth, .lbl-pred {
+  display: inline-block;
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: var(--radius-1);
+  vertical-align: middle;
+}
+.lbl-truth {
+  background: rgba(26, 25, 21, 0.06);
+  color: var(--ink-2);
+  border: 1px solid var(--hairline-strong);
+}
+.lbl-pred {
+  background: rgba(204, 120, 92, 0.10);
+  color: var(--copper-deep);
+  border: 1px solid rgba(204, 120, 92, 0.28);
+}
+[data-theme="dark"] .lbl-truth {
+  background: rgba(245, 241, 232, 0.06);
+  color: var(--ink-2);
+  border-color: rgba(245, 241, 232, 0.16);
+}
+
+/* Row-card head — stacked truth/model names */
+.rc-names {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-bottom: 2px;
+}
+.rc-name { font-size: 13px; line-height: 1.35; }
+.rc-name strong { color: var(--ink); font-weight: 600; }
+.rc-name-pred { color: var(--copper-deep); font-style: italic; }
+[data-theme="dark"] .rc-name-pred { color: var(--copper); }
 .kv-grid {
   display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
   font-size: 12px; color: var(--ink-2);

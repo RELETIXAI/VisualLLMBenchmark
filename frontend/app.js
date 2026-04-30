@@ -36,10 +36,21 @@ const api = {
 const LB = { selected: new Set(), filters: {provider:"", model_id:"", prompt_id:"", dataset_id:"", status:""}, bestOnly: false, runs: [] };
 
 const ACTIVE = { runId: null, expanded: true, expandedRows: new Set(), rawExpanded: new Set() };
+// Independent state for the read-only Runs-tab review (so it doesn't fight
+// the live poll's ACTIVE state).
+const REVIEW = { runId: null, expandedRows: new Set(), rawExpanded: new Set(), model_id: "" };
 
 function onRawToggle(e, idx) {
-  if (e.target.open) ACTIVE.rawExpanded.add(idx);
-  else ACTIVE.rawExpanded.delete(idx);
+  // Use ACTIVE if a live poll is on, REVIEW otherwise
+  const state = (ACTIVE.runId && document.getElementById("active-run") && !document.getElementById("active-run").classList.contains("hidden"))
+    ? ACTIVE : REVIEW;
+  if (e.target.open) state.rawExpanded.add(idx);
+  else state.rawExpanded.delete(idx);
+}
+function toggleReviewRow(idx) {
+  if (REVIEW.expandedRows.has(idx)) REVIEW.expandedRows.delete(idx);
+  else REVIEW.expandedRows.add(idx);
+  renderReviewRows();
 }
 
 // ----- Image lightbox (click any thumbnail to expand) -----
@@ -85,6 +96,19 @@ document.addEventListener("click", (e) => {
   if (t && t.classList && (t.classList.contains("thumb") || t.classList.contains("ds-thumb")) && t.dataset.src) {
     e.stopPropagation();
     openLightbox(t.dataset.src, t.dataset.caption || "");
+    return;
+  }
+  // Row-card head click → toggle the right state (live ACTIVE or review REVIEW)
+  const head = t && t.closest && t.closest(".row-card-head");
+  if (head && head.dataset && head.dataset.rowIdx) {
+    const idx = parseInt(head.dataset.rowIdx, 10);
+    // Decide which state we're in: if active-run panel is visible AND has the row, use ACTIVE
+    const inActive = ACTIVE.runId &&
+      document.getElementById("active-run") &&
+      !document.getElementById("active-run").classList.contains("hidden") &&
+      head.closest("#active-run");
+    if (inActive) toggleRow(idx);
+    else toggleReviewRow(idx);
   }
 });
 document.addEventListener("keydown", (e) => {
@@ -765,34 +789,81 @@ async function refreshRuns() {
 
 async function showRun(id) {
   const r = await api.run(id);
+  REVIEW.runId = r.id;
+  REVIEW.model_id = r.model_id || "";
+  REVIEW.expandedRows = new Set();
+  REVIEW.rawExpanded = new Set();
+  $("#runs-list").innerHTML = renderReview(r);
+}
+
+function renderReview(r) {
   const rows = r.rows || [];
-  const html = `<div class="card">
-    <h3>Run #${r.id} — ${escape(r.model_id)}</h3>
-    <div class="kvgrid">
-      <dt>Status</dt><dd>${r.status}${r.error?` <span class="pill err">error</span>`:""}</dd>
-      <dt>Score</dt><dd>${(r.composite_score||0).toFixed(2)}</dd>
-      <dt>Accuracy</dt><dd>${((r.accuracy||0)*100).toFixed(2)}%</dd>
-      <dt>Avg latency</dt><dd>${(r.avg_latency_ms/1000).toFixed(2)}s</dd>
-      <dt>Tokens</dt><dd>${fmtNum(r.total_input_tokens)} in / ${fmtNum(r.total_output_tokens)} out</dd>
-      <dt>Cost</dt><dd>$${(r.total_cost_usd||0).toFixed(4)}</dd>
+  const fmtPct = v => v == null ? "—" : `${(v*100).toFixed(1)}%`;
+  const accAvg = avgFromRows(rows, "macros_avg");
+  const f1Avg  = avgFromRows(rows, "ingredient_f1");
+  const wAvg   = avgFromRows(rows, "weight_acc");
+  const hAvg   = avgFromRows(rows, "health.score");
+
+  const stats = `
+    <div class="stat-row">
+      ${_statBox("Composite", `${(r.composite_score||0).toFixed(1)}`, _color((r.composite_score||0)/100))}
+      ${_statBox("Accuracy",  fmtPct(r.accuracy),  _color(r.accuracy||0))}
+      ${_statBox("Macros",    fmtPct(accAvg),       _color(accAvg))}
+      ${_statBox("Ing F1",    fmtPct(f1Avg),        _color(f1Avg))}
+      ${_statBox("Weights",   fmtPct(wAvg),         _color(wAvg))}
+      ${_statBox("Health",    fmtPct(hAvg),         _color(hAvg))}
+      ${_statBox("Cost",      `$${(r.total_cost_usd||0).toFixed(4)}`, "var(--ink)")}
+    </div>`;
+
+  const head = `
+    <div class="card">
+      <div class="row-between" style="align-items:center;margin-bottom:6px">
+        <div>
+          <h3 style="margin:0">Run #${r.id} · ${escape(r.model_id)} <span class="pill ${r.status==='completed'?'ok':r.status==='failed'?'err':r.status==='cancelled'?'err':'run'}">${r.status}</span></h3>
+          <div class="muted small">${escape(r.prompt_name||"")} · ${escape(r.provider)} · ${r.n_done}/${r.n_rows} rows · ${(r.avg_latency_ms/1000||0).toFixed(2)}s/row · ${fmtNum(r.total_input_tokens)} in / ${fmtNum(r.total_output_tokens)} out</div>
+        </div>
+        <button class="btn-ghost" onclick="refreshRuns()">← back to all runs</button>
+      </div>
+      ${r.error ? `<div class="error-box">${escape(r.error)}</div>` : ""}
+      ${stats}
     </div>
-    ${r.error ? `<div class="error-box">${escape(r.error)}</div>` : ""}
-    <h3 style="margin-top:18px">Per-row</h3>
-    <table><thead><tr><th>#</th><th>Latency</th><th>Tokens</th><th>Score</th><th>Output</th><th>Err</th></tr></thead>
-    <tbody>${rows.map(rr => {
-      const sc = JSON.parse(rr.scores||"{}");
-      const out = JSON.parse(rr.output_parsed||"{}");
-      return `<tr>
-        <td class="num">${rr.row_idx}</td>
-        <td class="num">${(rr.latency_ms/1000).toFixed(2)}s</td>
-        <td class="num">${rr.input_tokens}/${rr.output_tokens}</td>
-        <td class="num">${((sc.overall||0)*100).toFixed(0)}%</td>
-        <td class="small">${escape(out.food||"")} · ${escape(out.description||"")}</td>
-        <td class="small">${rr.error?`<span class="pill err">${escape(rr.error.slice(0,40))}</span>`:""}</td>
-      </tr>`;
-    }).join("")}</tbody></table>
-  </div>`;
-  $("#runs-list").innerHTML = html;
+  `;
+
+  return head + `
+    <div id="review-rows">
+      ${rows.length === 0 ? `<p class="muted">No rows.</p>` :
+        rows.map(rr => renderRowCard(rr, {
+          state: REVIEW,
+          modelId: r.model_id,
+          toggleFn: toggleReviewRow,
+        })).join("")}
+    </div>
+  `;
+}
+
+function avgFromRows(rows, key) {
+  const vals = [];
+  for (const rr of rows) {
+    if (rr.error) continue;
+    const sc = JSON.parse(rr.scores || "{}");
+    let v;
+    if (key.includes(".")) {
+      const parts = key.split(".");
+      v = sc[parts[0]] && sc[parts[0]][parts[1]];
+    } else {
+      v = sc[key];
+    }
+    if (typeof v === "number") vals.push(v);
+  }
+  return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : 0;
+}
+
+async function renderReviewRows() {
+  if (!REVIEW.runId) return;
+  const r = await api.run(REVIEW.runId);
+  $("#review-rows").innerHTML = (r.rows||[]).map(rr => renderRowCard(rr, {
+    state: REVIEW, modelId: r.model_id, toggleFn: toggleReviewRow,
+  })).join("");
 }
 
 // ----- BENCHMARK -----
@@ -1098,7 +1169,13 @@ function _statBox(label, value, color) {
   </div>`;
 }
 
-function renderRowCard(rr) {
+function renderRowCard(rr, opts) {
+  // opts: {state: {expandedRows, rawExpanded}, modelId, toggleFn}
+  // Defaults wire it to ACTIVE for the live poll view.
+  const state    = (opts && opts.state)    || ACTIVE;
+  const modelId  = (opts && opts.modelId)  || rr.run_model_id || "";
+  const toggleFn = (opts && opts.toggleFn) || (idx => toggleRow(idx));
+
   const sc = JSON.parse(rr.scores||"{}");
   const op = JSON.parse(rr.output_parsed||"{}");
   const truth = JSON.parse(rr.truth||"{}");
@@ -1109,7 +1186,7 @@ function renderRowCard(rr) {
   const health = sc.health || {};
   const ing = sc.ingredients || {};
   const ok = !rr.error;
-  const expanded = ACTIVE.expandedRows.has(rr.row_idx);
+  const expanded = state.expandedRows.has(rr.row_idx);
   const img = rr.image_ref || "";
   const imgSrc = img.startsWith("http") ? img : (img ? `/images/${img.split('/').pop()}` : null);
   const ts = rr.id ? new Date().toLocaleString() : "";
@@ -1127,7 +1204,7 @@ function renderRowCard(rr) {
     _statBox("Total cost",    "$"+(rr.cost_usd||0).toFixed(4), "var(--ink)"),
   ].filter(Boolean).join("");
 
-  // ---- macros table ----
+  // ---- macros table (truth column tinted slate, pred column tinted copper) ----
   const macroRows = ["calories","protein_g","carbs_g","fat_g","fiber_g","sugar_g","sodium_mg"]
     .map(k => {
       const d = (sc.nutrition_detail||{})[k];
@@ -1139,13 +1216,13 @@ function renderRowCard(rr) {
       const tip = d.in_tol ? `within ±${d.allowed}` : (d.missing?"missing":`Δ=${d.delta} vs ±${d.allowed}`);
       return `<tr>
         <td>${lbl}</td>
-        <td class="num">${d.truth==null?"—":d.truth+" "+unit}</td>
-        <td class="num">${d.pred==null?"—":d.pred+" "+unit}</td>
+        <td class="num col-truth">${d.truth==null?"—":d.truth+" "+unit}</td>
+        <td class="num col-pred">${d.pred==null?"—":d.pred+" "+unit}</td>
         <td class="num" style="color:${c}" title="${escape(tip)}">${flag} ${_pct(d.score)}</td>
       </tr>`;
     }).join("");
 
-  // ---- ingredient table ----
+  // ---- ingredient table (truth columns tinted slate, model columns tinted copper) ----
   let ingTable = "";
   if (truth.ingredients && truth.ingredients.length) {
     const matchRows = (ing.matches||[]).map(m => {
@@ -1153,30 +1230,38 @@ function renderRowCard(rr) {
       const wPct = m.weight_score==null ? "—" : _pct(m.weight_score);
       const wColor = m.weight_score==null ? "var(--muted)" : _color(m.weight_score);
       return `<tr>
-        <td>${escape(m.truth_name||"")}</td>
-        <td class="num">${m.truth_qty==null?"—":m.truth_qty+" "+escape(m.unit||"g")}</td>
-        <td>${escape(m.pred_name||"")}</td>
-        <td class="num">${m.pred_qty==null?"—":m.pred_qty+" "+escape(m.unit||"g")}</td>
+        <td class="col-truth">${escape(m.truth_name||"")}</td>
+        <td class="num col-truth">${m.truth_qty==null?"—":m.truth_qty+" "+escape(m.unit||"g")}</td>
+        <td class="col-pred">${escape(m.pred_name||"")}</td>
+        <td class="num col-pred">${m.pred_qty==null?"—":m.pred_qty+" "+escape(m.unit||"g")}</td>
         <td class="num" style="color:${_color(m.name_sim)}">${_pct(m.name_sim)}</td>
         <td class="num ${wc}" style="color:${wColor}">${wPct}</td>
       </tr>`;
     }).join("");
     const missingRows = (ing.unmatched_truth||[]).map(u => `<tr>
-      <td style="color:var(--red)">${escape(u.name||"")}</td>
-      <td class="num" style="color:var(--red)">${u.qty==null?"—":u.qty+" "+escape(u.unit||"g")}</td>
-      <td colspan="4" class="muted small" style="font-style:italic">missing from model output</td>
+      <td class="col-truth" style="color:var(--red)">${escape(u.name||"")}</td>
+      <td class="num col-truth" style="color:var(--red)">${u.qty==null?"—":u.qty+" "+escape(u.unit||"g")}</td>
+      <td colspan="4" class="muted small" style="font-style:italic">✗ model didn't return this ingredient</td>
     </tr>`).join("");
     const extraRows = (ing.unmatched_pred||[]).map(u => `<tr>
-      <td colspan="2" class="muted small" style="font-style:italic">not in benchmark</td>
-      <td style="color:var(--copper-deep)">${escape(u.name||"")}</td>
-      <td class="num" style="color:var(--copper-deep)">${u.qty==null?"—":u.qty+" "+escape(u.unit||"g")}</td>
+      <td colspan="2" class="muted small" style="font-style:italic">✗ not in benchmark truth</td>
+      <td class="col-pred" style="color:var(--copper-deep)">${escape(u.name||"")}</td>
+      <td class="num col-pred" style="color:var(--copper-deep)">${u.qty==null?"—":u.qty+" "+escape(u.unit||"g")}</td>
       <td colspan="2"></td>
     </tr>`).join("");
     ingTable = `
       <h4 class="rowcard-h">Ingredients · precision ${_pct(ing.precision||0)} · recall ${_pct(ing.recall||0)}</h4>
       <table class="ing-table">
         <thead><tr>
-          <th>Benchmark</th><th>Qty</th><th>Model</th><th>Qty</th><th>Match</th><th>Wt acc</th>
+          <th class="th-truth" colspan="2">▎WILLMA truth</th>
+          <th class="th-pred" colspan="2">▎Model — ${escape(modelId||"prediction")}</th>
+          <th>Name match</th><th>Qty acc</th>
+        </tr><tr class="ing-table-sub">
+          <th class="col-truth">Ingredient</th>
+          <th class="col-truth">Qty</th>
+          <th class="col-pred">Ingredient</th>
+          <th class="col-pred">Qty</th>
+          <th></th><th></th>
         </tr></thead>
         <tbody>${matchRows}${missingRows}${extraRows}</tbody>
       </table>`;
@@ -1196,27 +1281,32 @@ function renderRowCard(rr) {
     </div>`;
 
   const healthLine = (health.score!=null) ? `
-    <div class="muted small" style="margin-top:8px">
-      Health score: <code>${escape(health.truth||"—")}</code> → <code>${escape(health.pred||"—")}</code>
-      ${health.delta!=null ? ` · (delta ${health.delta} grade${health.delta===1?"":"s"})` : ""}
+    <div class="small" style="margin-top:8px">
+      <span class="muted">Health grade —</span>
+      <span class="lbl-truth">truth</span> <code>${escape(health.truth||"—")}</code>
+      <span class="muted">→</span>
+      <span class="lbl-pred">model</span> <code>${escape(health.pred||"—")}</code>
+      ${health.delta!=null ? ` <span class="muted">(Δ ${health.delta} grade${health.delta===1?"":"s"})</span>` : ""}
     </div>` : "";
 
-  const mealLine = `<div class="muted small">
-    Meal name: <span style="color:var(--ink)">${escape(op.food||"—")}</span>
-  </div>`;
+  const mealLine = `
+    <div class="small" style="margin-top:6px">
+      <div><span class="lbl-truth">truth</span> ${escape(truth.food||"—")}</div>
+      <div><span class="lbl-pred">model</span> <span style="color:var(--ink)">${escape(op.food||"—")}</span></div>
+    </div>`;
 
   return `
     <div class="row-card ${ok?"":"row-err"}">
-      <div class="row-card-head" onclick="toggleRow(${rr.row_idx})">
+      <div class="row-card-head" data-row-idx="${rr.row_idx}">
         ${imgSrc
           ? `<img class="thumb" src="${imgSrc}" data-src="${escape(imgSrc)}" data-caption="${escape(truth.food||op.food||"")}" loading="lazy" referrerpolicy="no-referrer" title="click to expand" />`
           : `<div class="thumb" style="background:var(--paper-2)"></div>`}
         <div style="flex:1;min-width:0">
-          <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-            <strong>${escape(truth.food||op.food||"—")}</strong>
-            <span class="muted small">${escape(rr.run_model_id||"")}</span>
+          <div class="rc-names">
+            <div class="rc-name"><span class="lbl-truth">truth</span> <strong>${escape(truth.food || "—")}</strong></div>
+            <div class="rc-name"><span class="lbl-pred">model</span> <span class="${(sc.name_sim||0)>=0.85?"":"rc-name-pred"}">${escape(op.food || "—")}</span></div>
           </div>
-          <div class="muted small">row ${rr.row_idx} · ${(rr.latency_ms/1000).toFixed(2)} s · $${cost.toFixed(4)}${rr.error?` · <span style="color:var(--red)">error</span>`:""}</div>
+          <div class="muted small">row ${rr.row_idx}${modelId?` · ${escape(modelId)}`:""} · ${(rr.latency_ms/1000).toFixed(2)} s · $${cost.toFixed(4)}${rr.error?` · <span style="color:var(--red)">error</span>`:""}</div>
         </div>
         <div style="text-align:right;min-width:90px">
           <div class="num" style="font-size:18px;font-weight:600;color:${_color(overall)}">${(overall*100).toFixed(1)}%</div>
@@ -1242,7 +1332,7 @@ function renderRowCard(rr) {
             </div>
             ${ingTable}
           `}
-          <details style="margin-top:14px" ${ACTIVE.rawExpanded.has(rr.row_idx) ? "open" : ""}
+          <details style="margin-top:14px" ${state.rawExpanded.has(rr.row_idx) ? "open" : ""}
                    ontoggle="onRawToggle(event, ${rr.row_idx})">
             <summary class="muted small" style="cursor:pointer">Raw model response</summary>
             <pre class="raw-output" data-row-idx="${rr.row_idx}">${escape(rr.output_text||"")}</pre>
