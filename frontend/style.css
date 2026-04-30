@@ -944,6 +944,19 @@ optgroup { font-style: normal; font-weight: 600; color: var(--muted); }
 .version-pill:hover {
   background: var(--copper); color: #fff; border-color: var(--copper-deep);
 }
+.version-pill-large {
+  font-size: 12px; padding: 3px 12px;
+  background: var(--ink); color: var(--canvas);
+  border-color: var(--ink);
+  cursor: default;
+}
+.version-pill-large:hover { background: var(--ink); color: var(--canvas); }
+
+.ds-version-strip {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
 
 .ds-row-corrected {
   border-left: 3px solid var(--copper);

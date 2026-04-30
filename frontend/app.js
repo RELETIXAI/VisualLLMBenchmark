@@ -14,7 +14,10 @@ const api = {
   uploadDS:    (file, tpl)  => { const fd = new FormData(); fd.append("file", file); if (tpl) fd.append("image_url_template", tpl); return fetch("/api/datasets", {method:"POST", body: fd}).then(r => r.json()); },
   deleteDS:    (id)    => fetch(`/api/datasets/${id}`, {method:"DELETE"}).then(r => r.json()),
   patchDS:     (id, b) => fetch(`/api/datasets/${id}`, {method:"PATCH", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b)}).then(r => r.json()),
-  dsRows:      (id, offset=0, limit=20, q="") => fetch(`/api/datasets/${id}/rows?offset=${offset}&limit=${limit}${q?`&q=${encodeURIComponent(q)}`:""}`).then(r => r.json()),
+  dsRows:      (id, offset=0, limit=20, q="", onlyCorrected=false) =>
+                  fetch(`/api/datasets/${id}/rows?offset=${offset}&limit=${limit}` +
+                        `${q?`&q=${encodeURIComponent(q)}`:""}` +
+                        `${onlyCorrected?`&only_corrected=true`:""}`).then(r => r.json()),
   previewDS:   (id)    => fetch(`/api/datasets/${id}/preview`).then(r => r.json()),
   runs:        (pid)   => fetch(`/api/runs${pid?`?prompt_id=${pid}`:""}`).then(r => r.json()),
   run:         (id)    => fetch(`/api/runs/${id}`).then(r => r.json()),
@@ -612,7 +615,7 @@ async function copyCompareMd(idsCsv) {
 }
 
 // ----- DATASETS -----
-const DS_VIEW = {}; // dataset_id -> {open: bool, offset: int, q: str}
+const DS_VIEW = {}; // dataset_id -> {open: bool, offset: int, q: str, only_corrected: bool}
 
 const URL_PRESETS = [
   {
@@ -628,12 +631,39 @@ async function refreshDatasets() {
     list.innerHTML = `<p class="muted">No datasets yet. Upload one above.</p>`;
     return;
   }
+  // Pull versions metadata for each dataset in parallel
+  const versionsByDs = {};
+  await Promise.all(CACHE.datasets.map(async d => {
+    try { versionsByDs[d.id] = await api.dsVersions(d.id); }
+    catch { versionsByDs[d.id] = {current_version: 0, history: []}; }
+  }));
+
   list.innerHTML = CACHE.datasets.map(d => {
     const cols = Object.entries(JSON.parse(d.columns_detected||"{}"));
     const hasTpl = !!d.image_url_template;
     const presetButtons = URL_PRESETS.map(p =>
       `<button class="btn-ghost" onclick="applyTpl(${d.id}, '${escape(p.template)}')">Apply ${escape(p.name)} preset</button>`
     ).join(" ");
+
+    const v   = versionsByDs[d.id] || {current_version: 0, history: []};
+    const cur = v.current_version || 0;
+    const nChanges = (v.history || []).length;
+    const uniqueImgs = new Set((v.history || []).map(h => h.image_id)).size;
+    const versionStrip = `
+      <div class="ds-version-strip">
+        <span class="version-pill version-pill-large">dataset @ v${cur}</span>
+        ${cur > 0
+          ? `<span class="muted small">
+               ${uniqueImgs} corrected image${uniqueImgs===1?"":"s"} ·
+               ${nChanges} total change${nChanges===1?"":"s"}
+             </span>
+             <button class="btn-ghost" onclick="openVersionsTimeline(${d.id})">View timeline</button>
+             <button class="btn-ghost" onclick="toggleDsView(${d.id}, {only_corrected:true})">See ${uniqueImgs} corrected row${uniqueImgs===1?"":"s"}</button>
+             <button class="btn-ghost" onclick="rescoreAllForDataset(${d.id})" title="Re-score every completed run against the latest truth">↻ Re-score all runs</button>`
+          : `<span class="muted small">no corrections yet — promote a model output or edit truth on any row to start versioning</span>`
+        }
+      </div>`;
+
     return `
       <div class="card ds-card" id="ds-card-${d.id}">
         <div class="row-between" style="margin-bottom:0;align-items:center">
@@ -656,6 +686,7 @@ async function refreshDatasets() {
             <button class="btn-ghost btn-danger-text" onclick="deleteDataset(${d.id}, '${escape(d.name).replace(/'/g,"\\'")}')">Delete</button>
           </div>
         </div>
+        ${versionStrip}
         <div id="ds-view-${d.id}"></div>
       </div>
     `;
@@ -712,9 +743,15 @@ async function deleteDataset(id, name) {
   }
 }
 
-async function toggleDsView(id) {
-  const state = DS_VIEW[id] = DS_VIEW[id] || {open: false, offset: 0, q: ""};
-  state.open = !state.open;
+async function toggleDsView(id, opts) {
+  const state = DS_VIEW[id] = DS_VIEW[id] || {open: false, offset: 0, q: "", only_corrected: false};
+  if (opts && opts.only_corrected != null) {
+    state.only_corrected = !!opts.only_corrected;
+    state.offset = 0;
+    state.open = true;   // force open when toggling filters
+  } else {
+    state.open = !state.open;
+  }
   $(`#ds-toggle-${id}`).textContent = state.open ? "Hide rows" : "View rows";
   if (state.open) await renderDsView(id);
   else $(`#ds-view-${id}`).innerHTML = "";
@@ -724,7 +761,7 @@ async function renderDsView(id) {
   const state = DS_VIEW[id];
   const box = $(`#ds-view-${id}`);
   box.innerHTML = `<div class="muted small" style="padding:14px 0">Loading rows…</div>`;
-  const data = await api.dsRows(id, state.offset, 20, state.q);
+  const data = await api.dsRows(id, state.offset, 20, state.q, state.only_corrected);
   const rows = data.rows || [];
   const start = data.offset + 1;
   const end = data.offset + rows.length;
@@ -735,25 +772,39 @@ async function renderDsView(id) {
     <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
       <div class="row-between" style="margin-bottom:10px;align-items:center;flex-wrap:wrap">
         <div class="muted small">
-          ${start}–${end} of ${total.toLocaleString()}${state.q?` matching "${escape(state.q)}"`:""}
+          ${state.only_corrected
+            ? `<span class="pill run">corrected only</span> ${total} row${total===1?"":"s"}`
+            : `${start}–${end} of ${total.toLocaleString()}${state.q?` matching "${escape(state.q)}"`:""}`}
           · <span class="pill ${cur>0?"run":""}">dataset @ v${cur}</span>
           ${cur>0 ? `<button class="link-btn" onclick="openVersionsTimeline(${id})" title="View change history + restore">timeline</button>` : ""}
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          <input type="text" placeholder="search food name…" value="${escape(state.q)}" id="ds-q-${id}" style="width:200px;padding:6px 10px;font-size:13px" />
+          <label class="small muted" style="display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="ds-corr-${id}" ${state.only_corrected?"checked":""} onchange="toggleDsCorrected(${id}, this.checked)" />
+            corrected only
+          </label>
+          <input type="text" placeholder="search food name…" value="${escape(state.q)}" id="ds-q-${id}" style="width:180px;padding:6px 10px;font-size:13px" />
           <button class="btn-ghost" onclick="dsSearch(${id})">Search</button>
           <button class="btn-ghost" onclick="dsPage(${id}, -20)" ${state.offset<=0?"disabled":""}>← prev</button>
           <button class="btn-ghost" onclick="dsPage(${id}, 20)" ${end>=total?"disabled":""}>next →</button>
         </div>
       </div>
       <div class="ds-grid">
-        ${rows.length === 0 ? `<div class="muted small">No rows.</div>` :
-          rows.map(r => renderDsRow(r, id)).join("")}
+        ${rows.length === 0
+          ? `<div class="muted small">${state.only_corrected ? "No corrections yet for this dataset." : "No rows."}</div>`
+          : rows.map(r => renderDsRow(r, id)).join("")}
       </div>
     </div>`;
-  // Enter-to-search
   const inp = $(`#ds-q-${id}`);
   if (inp) inp.onkeydown = (e) => { if (e.key === "Enter") dsSearch(id); };
+}
+
+function toggleDsCorrected(id, checked) {
+  const state = DS_VIEW[id];
+  if (!state) return;
+  state.only_corrected = !!checked;
+  state.offset = 0;
+  renderDsView(id);
 }
 
 // ============================================================
