@@ -1074,6 +1074,7 @@ async function refreshRuns() {
 async function showRun(id) {
   const r = await api.run(id);
   REVIEW.runId = r.id;
+  REVIEW.datasetId = r.dataset_id;          // <- needed by renderRowCard's promote panel
   REVIEW.model_id = r.model_id || "";
   REVIEW.expandedRows = new Set();
   REVIEW.rawExpanded = new Set();
@@ -1116,6 +1117,7 @@ async function loadRunDrawer(id) {
     body.innerHTML = `<div class="error-box">${escape(String(e))}</div>`; return;
   }
   REVIEW.model_id = r.model_id || "";
+  REVIEW.datasetId = r.dataset_id;          // <- needed by promote panel
   document.getElementById("run-drawer-title").textContent =
     `Run #${r.id} · ${r.model_id} · ${r.status}`;
   body.innerHTML = renderReviewBody(r);
@@ -1217,8 +1219,15 @@ function avgFromRows(rows, key) {
 async function renderReviewRows() {
   if (!REVIEW.runId) return;
   const r = await api.run(REVIEW.runId);
+  // Keep REVIEW state in sync — earlier code paths may have skipped this.
+  REVIEW.datasetId = r.dataset_id;
+  REVIEW.model_id  = r.model_id || "";
   $("#review-rows").innerHTML = (r.rows||[]).map(rr => renderRowCard(rr, {
-    state: REVIEW, modelId: r.model_id, toggleFn: toggleReviewRow,
+    state:   REVIEW,
+    modelId: r.model_id,
+    toggleFn:toggleReviewRow,
+    runId:   r.id,
+    datasetId: r.dataset_id,
   })).join("");
 }
 
