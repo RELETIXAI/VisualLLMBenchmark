@@ -200,13 +200,29 @@ def _extract_xlsx_images(ws, images_dir: Path) -> dict[int, str]:
 _PARSE_CACHE: dict = {}
 
 
-def _apply_corrections(rows: list[dict], dataset_id: int | None) -> int:
-    """Apply per-(dataset_id, image_id) corrections from the corrections table.
+def _apply_truth_payload(row: dict, payload: dict) -> None:
+    if payload.get("food") is not None:
+        row["food"] = payload["food"]
+    if payload.get("description") is not None:
+        row["description"] = payload["description"]
+    if isinstance(payload.get("nutrition"), dict):
+        row["nutrition_truth"] = {**(row.get("nutrition_truth") or {}),
+                                  **payload["nutrition"]}
+    if isinstance(payload.get("ingredients"), list) and payload["ingredients"]:
+        row["ingredients_truth"] = payload["ingredients"]
+    if payload.get("health_score") is not None:
+        row["health_score_truth"] = payload["health_score"]
 
-    Mutates rows in place; returns count of rows touched.  Each correction
-    holds the full canonical truth payload (food / description / nutrition /
-    ingredients / health_score) that overrides the original Excel for that
-    image. The original file is never modified.
+
+def _apply_corrections(rows: list[dict], dataset_id: int | None,
+                      at_version: int | None = None) -> int:
+    """Apply per-(dataset_id, image_id) truth corrections.
+
+    If at_version is None, uses the current corrections table (fast path).
+    If at_version is set, walks correction_history up to that version and
+    applies only those — exactly the truth set that was in effect at v{N}.
+    Returns count of rows touched. Each row also gets _correction_meta with
+    {is_corrected, version_when_changed, change_count} for the UI.
     """
     if not dataset_id:
         return 0
@@ -215,38 +231,57 @@ def _apply_corrections(rows: list[dict], dataset_id: int | None) -> int:
     except ImportError:
         return 0
     import json as _json
+
+    if at_version is None:
+        # Build state from current corrections in one shot
+        items = db.list_corrections(dataset_id)
+        state = {}
+        meta = {}   # image_id -> (last_version, change_count)
+        # Pull change counts from history for the meta sidebar
+        for c in items:
+            try:
+                state[c["image_id"]] = _json.loads(c.get("truth_json") or "{}")
+            except Exception:
+                continue
+        # Lightweight per-image meta — query history once
+        try:
+            with db._conn() as conn:
+                rows_h = conn.execute("""
+                    SELECT image_id, MAX(version_after) AS v, COUNT(*) AS n
+                    FROM correction_history WHERE dataset_id=?
+                    GROUP BY image_id
+                """, (dataset_id,)).fetchall()
+                for h in rows_h:
+                    meta[h["image_id"]] = (h["v"], h["n"])
+        except Exception:
+            pass
+    else:
+        state = db.replay_history(dataset_id, at_version)
+        meta = {}
+
     n = 0
     for row in rows:
         img_id = row.get("image_id") or row.get("image_path")
         if not img_id:
             continue
-        # Match by image_id OR by row_idx fallback
-        c = db.get_correction(dataset_id, str(img_id))
-        if not c:
+        payload = state.get(str(img_id))
+        if not payload:
             continue
-        try:
-            payload = _json.loads(c["truth_json"])
-        except Exception:
-            continue
-        if payload.get("food") is not None:
-            row["food"] = payload["food"]
-        if payload.get("description") is not None:
-            row["description"] = payload["description"]
-        if isinstance(payload.get("nutrition"), dict):
-            row["nutrition_truth"] = {**(row.get("nutrition_truth") or {}),
-                                      **payload["nutrition"]}
-        if isinstance(payload.get("ingredients"), list) and payload["ingredients"]:
-            row["ingredients_truth"] = payload["ingredients"]
-        if payload.get("health_score") is not None:
-            row["health_score_truth"] = payload["health_score"]
-        row["_corrected"] = True
+        _apply_truth_payload(row, payload)
+        m = meta.get(str(img_id))
+        row["_correction"] = {
+            "is_corrected": True,
+            "version_when_changed": m[0] if m else None,
+            "change_count": m[1] if m else None,
+        }
         n += 1
     return n
 
 
 def parse_dataset(file_path: str | Path, images_dir: str | Path = "data/images",
                   image_url_template: str | None = None,
-                  dataset_id: int | None = None) -> dict:
+                  dataset_id: int | None = None,
+                  at_version: int | None = None) -> dict:
     """Returns {'rows': [...], 'columns_detected': {...}, 'n': N}.
 
     image_url_template: if set, when an image cell holds an opaque id
@@ -258,21 +293,22 @@ def parse_dataset(file_path: str | Path, images_dir: str | Path = "data/images",
     images_dir = Path(images_dir)
     suffix = file_path.suffix.lower()
 
-    cache_key = (str(file_path), str(image_url_template), int(dataset_id or 0))
+    cache_key = (str(file_path), str(image_url_template),
+                 int(dataset_id or 0), int(at_version) if at_version is not None else -1)
     try:
         mtime = file_path.stat().st_mtime
     except FileNotFoundError:
         mtime = 0
     cached = _PARSE_CACHE.get(cache_key)
-    # Invalidate when corrections change too — bump cache by checking
-    # the latest correction created_at for this dataset.
+    # Invalidate when corrections change. For at_version=None we track
+    # latest correction created_at; for fixed versions the snapshot is stable.
     correction_ts = 0
-    if dataset_id:
+    if dataset_id and at_version is None:
         try:
             from . import db as _db
             with _db._conn() as _c:
                 r = _c.execute(
-                    "SELECT MAX(created_at) AS t FROM corrections WHERE dataset_id=?",
+                    "SELECT MAX(created_at) AS t FROM correction_history WHERE dataset_id=?",
                     (dataset_id,)).fetchone()
                 correction_ts = r["t"] or 0
         except Exception:
@@ -361,8 +397,19 @@ def parse_dataset(file_path: str | Path, images_dir: str | Path = "data/images",
         rows.append(row)
 
     # Apply corrections overlay AFTER parse, before caching.
-    n_corrected = _apply_corrections(rows, dataset_id)
+    n_corrected = _apply_corrections(rows, dataset_id, at_version=at_version)
+    # Compute current version for surfacing in API
+    cur_version = 0
+    if dataset_id:
+        try:
+            from . import db as _db
+            cur_version = _db.current_dataset_version(dataset_id)
+        except Exception:
+            pass
+    effective_version = at_version if at_version is not None else cur_version
     result = {"rows": rows, "columns_detected": col_map, "n": len(rows),
-              "n_corrected": n_corrected}
+              "n_corrected": n_corrected,
+              "version": effective_version,
+              "current_version": cur_version}
     _PARSE_CACHE[cache_key] = {"mtime": mtime, "correction_ts": correction_ts, "result": result}
     return result

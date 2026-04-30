@@ -166,11 +166,18 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
         raise ValueError("Prompt or dataset not found")
 
     n = dataset["n_rows"] if not max_rows else min(max_rows, dataset["n_rows"])
+    # Pin the run to the dataset version that's current at start time
+    pinned_version = db.current_dataset_version(dataset_id)
     config = {"user_prompt": user_prompt, "pricing_override": pricing_override,
               "weights": weights, "max_rows": max_rows, "base_url": base_url,
-              "random_sample": random_sample}
+              "random_sample": random_sample, "pinned_version": pinned_version}
     run_id = db.create_run(prompt_id=prompt_id, dataset_id=dataset_id,
                            provider=provider_name, model_id=model_id, n_rows=n, config=config)
+    # Stamp dataset_version on the run row
+    try:
+        db.update_run(run_id, dataset_version=pinned_version)
+    except Exception:
+        pass
     _get_controls(run_id)  # pre-create controls so pause/cancel work immediately
 
     th = threading.Thread(

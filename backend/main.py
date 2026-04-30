@@ -180,32 +180,40 @@ def get_datasets():
 
 
 @app.get("/api/datasets/{dataset_id}/preview")
-def preview_dataset(dataset_id: int, n: int = 5):
+def preview_dataset(dataset_id: int, n: int = 5, version: Optional[int] = None):
     ds = db.get_dataset(dataset_id)
     if not ds:
         raise HTTPException(404, "Not found")
     parsed = parse_dataset(ds["file_path"], images_dir=IMAGES_DIR,
                            image_url_template=ds.get("image_url_template"),
-                           dataset_id=ds["id"])
-    return {"dataset": ds, "rows": parsed["rows"][:n], "n_total": parsed["n"]}
+                           dataset_id=ds["id"], at_version=version)
+    return {"dataset": ds, "rows": parsed["rows"][:n], "n_total": parsed["n"],
+            "version": parsed.get("version"),
+            "current_version": parsed.get("current_version")}
 
 
 @app.get("/api/datasets/{dataset_id}/rows")
-def get_dataset_rows(dataset_id: int, offset: int = 0, limit: int = 20, q: Optional[str] = None):
+def get_dataset_rows(dataset_id: int, offset: int = 0, limit: int = 20,
+                     q: Optional[str] = None, version: Optional[int] = None,
+                     only_corrected: bool = False):
     ds = db.get_dataset(dataset_id)
     if not ds:
         raise HTTPException(404, "Not found")
     parsed = parse_dataset(ds["file_path"], images_dir=IMAGES_DIR,
                            image_url_template=ds.get("image_url_template"),
-                           dataset_id=ds["id"])
+                           dataset_id=ds["id"], at_version=version)
     rows = parsed["rows"]
     if q:
         ql = q.lower().strip()
         rows = [r for r in rows if r.get("food") and ql in r["food"].lower()]
+    if only_corrected:
+        rows = [r for r in rows if (r.get("_correction") or {}).get("is_corrected")]
     total = len(rows)
     page = rows[offset:offset + limit]
     return {"dataset": ds, "rows": page, "offset": offset, "limit": limit, "total": total,
-            "n_total": parsed["n"]}
+            "n_total": parsed["n"],
+            "version": parsed.get("version"),
+            "current_version": parsed.get("current_version")}
 
 
 @app.delete("/api/datasets/{dataset_id}")
@@ -250,6 +258,39 @@ def post_correction(c: CorrectionIn):
 @app.delete("/api/corrections/{correction_id}")
 def del_correction(correction_id: int):
     return db.delete_correction(correction_id)
+
+
+# ---------- Dataset versions ----------
+@app.get("/api/datasets/{dataset_id}/versions")
+def get_dataset_versions(dataset_id: int):
+    items = db.list_dataset_versions(dataset_id)
+    return {
+        "dataset_id": dataset_id,
+        "current_version": db.current_dataset_version(dataset_id),
+        "history": items,
+    }
+
+
+@app.get("/api/datasets/{dataset_id}/image/{image_id}/history")
+def get_image_history(dataset_id: int, image_id: str):
+    return {
+        "dataset_id": dataset_id,
+        "image_id": image_id,
+        "history": db.list_image_history(dataset_id, image_id),
+        "current_version": db.current_dataset_version(dataset_id),
+    }
+
+
+class RestoreIn(BaseModel):
+    version: int
+    note: Optional[str] = None
+
+
+@app.post("/api/datasets/{dataset_id}/restore")
+def restore_dataset(dataset_id: int, body: RestoreIn):
+    if body.version < 0:
+        raise HTTPException(400, "version must be >= 0")
+    return db.restore_dataset_to_version(dataset_id, body.version, body.note)
 
 
 class DatasetPatchIn(BaseModel):
@@ -323,12 +364,10 @@ def cancel_run(run_id: int):
 
 
 @app.post("/api/runs/{run_id}/rescore")
-def rescore_run(run_id: int):
-    """Recompute scores for an existing run against the current truth + any
-    corrections, WITHOUT re-calling the provider. Useful after promoting a
-    prediction to truth, fixing a wrong benchmark, or tuning the scoring
-    function: the model's stored output stays put, only the comparison
-    against truth is redone.
+def rescore_run(run_id: int, version: Optional[int] = None):
+    """Recompute scores for an existing run against the truth at the given
+    dataset version (defaults to current latest). Stored predictions are
+    untouched; only the comparison against truth is redone. No provider calls.
     """
     import sqlite3
     from .scoring import score_row, composite_score
@@ -342,7 +381,8 @@ def rescore_run(run_id: int):
     parsed = parse_dataset(dataset["file_path"],
                            images_dir=IMAGES_DIR,
                            image_url_template=dataset.get("image_url_template"),
-                           dataset_id=dataset["id"])
+                           dataset_id=dataset["id"],
+                           at_version=version)
     truth_by_idx = {r["row_idx"]: r for r in parsed["rows"]}
 
     n_changed = 0
@@ -410,10 +450,18 @@ def rescore_run(run_id: int):
                   total_input_tokens=total_in, total_output_tokens=total_out,
                   total_cost_usd=total_cost, composite_score=comp)
     new_run = db.get_run(run_id)
+    # Stamp the run's dataset_version to whatever we just scored against
+    if version is not None:
+        try: db.update_run(run_id, dataset_version=version)
+        except Exception: pass
+    else:
+        try: db.update_run(run_id, dataset_version=parsed.get("current_version", 0))
+        except Exception: pass
     return {
         "rescored": True,
         "rows_changed": n_changed,
         "n_corrections_applied": parsed.get("n_corrected", 0),
+        "scored_at_version": parsed.get("version"),
         "accuracy_before": (run.get("accuracy") or 0),
         "accuracy_after": new_run.get("accuracy"),
         "composite_before": run.get("composite_score") or 0,

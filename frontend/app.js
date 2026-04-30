@@ -34,6 +34,9 @@ const api = {
   corrections: (dsId)  => fetch(`/api/corrections?dataset_id=${dsId}`).then(r => r.json()),
   saveCorrection: (b)  => fetch("/api/corrections", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b)}).then(r => r.json()),
   delCorrection:  (id) => fetch(`/api/corrections/${id}`, {method:"DELETE"}).then(r => r.json()),
+  dsVersions:  (id)    => fetch(`/api/datasets/${id}/versions`).then(r => r.json()),
+  imageHistory:(dsId, imageId) => fetch(`/api/datasets/${dsId}/image/${encodeURIComponent(imageId)}/history`).then(r => r.json()),
+  restoreDs:   (id, body) => fetch(`/api/datasets/${id}/restore`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)}).then(r => r.json()),
 };
 
 const LB = { selected: new Set(), filters: {provider:"", model_id:"", prompt_id:"", dataset_id:"", status:""}, bestOnly: false, runs: [] };
@@ -285,7 +288,7 @@ async function reloadLeaderboardTable() {
         <td><span class="pill">${escape(r.provider)}</span></td>
         <td><strong>${escape(r.model_id)}</strong></td>
         <td class="small">${escape(r.prompt_name||"")}</td>
-        <td class="small">${escape(r.dataset_name||"")}</td>
+        <td class="small">${escape(r.dataset_name||"")}${r.dataset_version?`<span class="muted small"> · v${r.dataset_version}</span>`:""}</td>
         <td>${renderBullet(r.composite_score||0)}</td>
         <td class="num">${((r.accuracy||0)*100).toFixed(1)}%</td>
         <td class="num">${((r.avg_latency_ms||0)/1000).toFixed(2)}s</td>
@@ -726,12 +729,17 @@ async function renderDsView(id) {
   const start = data.offset + 1;
   const end = data.offset + rows.length;
   const total = data.total;
+  const cur = data.current_version || 0;
 
   box.innerHTML = `
     <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
-      <div class="row-between" style="margin-bottom:10px;align-items:center">
-        <div class="muted small">${start}–${end} of ${total.toLocaleString()}${state.q?` matching "${escape(state.q)}"`:""}</div>
-        <div style="display:flex;gap:6px;align-items:center">
+      <div class="row-between" style="margin-bottom:10px;align-items:center;flex-wrap:wrap">
+        <div class="muted small">
+          ${start}–${end} of ${total.toLocaleString()}${state.q?` matching "${escape(state.q)}"`:""}
+          · <span class="pill ${cur>0?"run":""}">dataset @ v${cur}</span>
+          ${cur>0 ? `<button class="link-btn" onclick="openVersionsTimeline(${id})" title="View change history + restore">timeline</button>` : ""}
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <input type="text" placeholder="search food name…" value="${escape(state.q)}" id="ds-q-${id}" style="width:200px;padding:6px 10px;font-size:13px" />
           <button class="btn-ghost" onclick="dsSearch(${id})">Search</button>
           <button class="btn-ghost" onclick="dsPage(${id}, -20)" ${state.offset<=0?"disabled":""}>← prev</button>
@@ -740,7 +748,7 @@ async function renderDsView(id) {
       </div>
       <div class="ds-grid">
         ${rows.length === 0 ? `<div class="muted small">No rows.</div>` :
-          rows.map(r => renderDsRow(r)).join("")}
+          rows.map(r => renderDsRow(r, id)).join("")}
       </div>
     </div>`;
   // Enter-to-search
@@ -748,7 +756,173 @@ async function renderDsView(id) {
   if (inp) inp.onkeydown = (e) => { if (e.key === "Enter") dsSearch(id); };
 }
 
-function renderDsRow(r) {
+// ============================================================
+// Version timeline + per-image history modals
+// ============================================================
+async function openVersionsTimeline(datasetId) {
+  const data = await api.dsVersions(datasetId);
+  const ds = (CACHE.datasets || []).find(d => d.id === datasetId);
+  const items = data.history || [];
+  // Group by version
+  const byVersion = {};
+  for (const h of items) {
+    (byVersion[h.version_after] = byVersion[h.version_after] || []).push(h);
+  }
+  const versions = Object.keys(byVersion).map(v => parseInt(v)).sort((a,b)=>b-a);
+  const cur = data.current_version || 0;
+
+  showCustomModal({
+    title: `Version history · ${escape(ds?.name||`dataset #${datasetId}`)}`,
+    subtitle: `${versions.length} version${versions.length===1?"":"s"} · current = v${cur}`,
+    bodyHtml: `
+      <div class="version-timeline">
+        <div class="vt-row vt-row-base">
+          <div class="vt-v">v0</div>
+          <div class="vt-meta">
+            <strong>Original benchmark</strong>
+            <div class="muted small">Truth as parsed from the source Excel.</div>
+          </div>
+          <div class="vt-actions">
+            ${cur > 0 ? `<button class="btn-ghost btn-danger-text" onclick="confirmRestore(${datasetId}, 0)">Restore</button>` : `<span class="muted small">current</span>`}
+          </div>
+        </div>
+        ${versions.map(v => {
+          const entries = byVersion[v];
+          const e = entries[0];
+          const actionLabel = entries.length > 1 ? `${entries.length} changes` : (e.action || "change");
+          const isCurrent = v === cur;
+          return `
+            <div class="vt-row${isCurrent?" vt-row-current":""}">
+              <div class="vt-v">v${v}</div>
+              <div class="vt-meta">
+                <strong>${escape(actionLabel)}</strong>
+                <div class="muted small">
+                  ${entries.map(en => `<button class="link-btn" onclick="openImageHistory(${datasetId}, '${escape(en.image_id)}')">${escape(en.image_id.slice(0,18))}…</button>`).join(" · ")}
+                </div>
+                ${e.note ? `<div class="muted small" style="margin-top:2px;font-style:italic">"${escape(e.note)}"</div>` : ""}
+                <div class="muted small">${new Date((e.created_at||0)*1000).toLocaleString()}</div>
+              </div>
+              <div class="vt-actions">
+                ${isCurrent ? `<span class="muted small">current</span>` : `<button class="btn-ghost" onclick="confirmRestore(${datasetId}, ${v})">Restore</button>`}
+              </div>
+            </div>`;
+        }).join("")}
+      </div>
+    `,
+    footerHtml: `
+      <button class="btn-ghost" onclick="closeCustomModal()">Close</button>
+      <button class="btn" onclick="rescoreAllForDataset(${datasetId}); closeCustomModal();">↻ Re-score all runs at current</button>
+    `,
+  });
+}
+
+async function confirmRestore(datasetId, targetVersion) {
+  if (!confirm(`Restore dataset to version ${targetVersion}?\n\nThis rolls the active corrections set forward/backward to match v${targetVersion} and creates a NEW version (so you can always restore back).`)) return;
+  const r = await api.restoreDs(datasetId, {version: targetVersion, note: `restore to v${targetVersion}`});
+  toast(`Restored to v${targetVersion} → new v${r.new_version} (${r.n_changed} change${r.n_changed===1?"":"s"})`);
+  closeCustomModal();
+  refreshDatasets();
+  if (DS_VIEW[datasetId] && DS_VIEW[datasetId].open) renderDsView(datasetId);
+}
+
+async function openImageHistory(datasetId, imageId) {
+  const data = await api.imageHistory(datasetId, imageId);
+  const items = data.history || [];
+  showCustomModal({
+    title: `Change history`,
+    subtitle: `image ${escape(imageId.slice(0,32))}…  ·  ${items.length} change${items.length===1?"":"s"}`,
+    bodyHtml: items.length === 0 ? `<p class="muted">No corrections yet for this image.</p>` : `
+      <div class="image-history">
+        ${items.slice().reverse().map(h => {
+          let prevT, newT;
+          try { prevT = h.prev_truth_json ? JSON.parse(h.prev_truth_json) : null; } catch { prevT = null; }
+          try { newT  = h.truth_json      ? JSON.parse(h.truth_json) : null;      } catch { newT  = null; }
+          return `
+            <div class="ih-entry">
+              <div class="ih-head">
+                <span class="vt-v">v${h.version_after}</span>
+                <span class="pill ${h.action==='delete'?'err':h.action==='restore'?'warn':'run'}">${h.action}</span>
+                <span class="muted small">${new Date((h.created_at||0)*1000).toLocaleString()}</span>
+                ${h.note ? `<span class="muted small">· ${escape(h.note)}</span>` : ""}
+              </div>
+              <div class="ih-diff">
+                ${renderTruthDiff(prevT, newT)}
+              </div>
+            </div>`;
+        }).join("")}
+      </div>
+    `,
+    footerHtml: `<button class="btn-ghost" onclick="closeCustomModal()">Close</button>`,
+  });
+}
+
+function renderTruthDiff(prev, next) {
+  const fields = ["food", "description", "health_score"];
+  const macros = ["calories","protein_g","carbs_g","fat_g","fiber_g","sugar_g","sodium_mg"];
+  let out = "";
+  for (const k of fields) {
+    const a = prev ? prev[k] : null;
+    const b = next ? next[k] : null;
+    if (a === b) continue;
+    out += `<div class="ih-field"><span class="muted small">${k}</span><div><span class="ih-old">${escape(a||"—")}</span> <span class="muted">→</span> <span class="ih-new">${escape(b||"—")}</span></div></div>`;
+  }
+  // Macros table
+  const pn = (prev && prev.nutrition) || {};
+  const nn = (next && next.nutrition) || {};
+  const changedMacros = macros.filter(m => (pn[m] ?? null) !== (nn[m] ?? null));
+  if (changedMacros.length) {
+    out += `<table class="ih-macros"><thead><tr><th></th>${changedMacros.map(m=>`<th>${m}</th>`).join("")}</tr></thead>
+      <tbody>
+        <tr><td class="muted small">before</td>${changedMacros.map(m=>`<td class="num ih-old">${pn[m]??"—"}</td>`).join("")}</tr>
+        <tr><td class="muted small">after</td>${changedMacros.map(m=>`<td class="num ih-new">${nn[m]??"—"}</td>`).join("")}</tr>
+      </tbody></table>`;
+  }
+  // Ingredients counts
+  const pi = (prev && prev.ingredients) || [];
+  const ni = (next && next.ingredients) || [];
+  if (pi.length !== ni.length) {
+    out += `<div class="ih-field"><span class="muted small">ingredients</span><div><span class="ih-old">${pi.length}</span> <span class="muted">→</span> <span class="ih-new">${ni.length}</span></div></div>`;
+  }
+  return out || `<div class="muted small">(no field-level diff available)</div>`;
+}
+
+// Generic modal helper (reuses .modal styles)
+function showCustomModal({title, subtitle, bodyHtml, footerHtml}) {
+  let m = document.getElementById("custom-modal");
+  if (!m) {
+    m = document.createElement("div");
+    m.id = "custom-modal";
+    m.className = "modal hidden";
+    m.innerHTML = `
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-panel">
+        <div class="modal-head">
+          <div>
+            <h3 id="cm-title" style="margin:0">—</h3>
+            <div class="muted small" id="cm-subtitle"></div>
+          </div>
+          <button class="btn-ghost" onclick="closeCustomModal()">✕</button>
+        </div>
+        <div class="modal-body" id="cm-body"></div>
+        <div class="modal-foot" id="cm-foot"></div>
+      </div>`;
+    document.body.appendChild(m);
+    m.querySelector(".modal-backdrop").onclick = closeCustomModal;
+  }
+  m.querySelector("#cm-title").textContent = title;
+  m.querySelector("#cm-subtitle").innerHTML = subtitle || "";
+  m.querySelector("#cm-body").innerHTML = bodyHtml || "";
+  m.querySelector("#cm-foot").innerHTML = footerHtml || "";
+  m.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+}
+function closeCustomModal() {
+  const m = document.getElementById("custom-modal");
+  if (m) m.classList.add("hidden");
+  document.body.style.overflow = "";
+}
+
+function renderDsRow(r, dsId) {
   const src = r.image_url || (r.image_path ? `/images/${r.image_path.split('/').pop()}` : null);
   const nut = r.nutrition_truth || {};
   const cells = [
@@ -760,13 +934,22 @@ function renderDsRow(r) {
     ["sug",  nut.sugar_g],
     ["Na",   nut.sodium_mg],
   ];
+  const corr = r._correction || {};
+  const versionPill = corr.is_corrected
+    ? `<button class="version-pill" onclick="event.stopPropagation(); openImageHistory(${dsId}, '${escape(r.image_id||"")}')" title="${corr.change_count||1} change${corr.change_count===1?"":"s"} · last at v${corr.version_when_changed}">
+         ✎ v${corr.version_when_changed||"?"}${corr.change_count>1?` ×${corr.change_count}`:""}
+       </button>`
+    : "";
   return `
-    <div class="ds-row">
+    <div class="ds-row${corr.is_corrected?" ds-row-corrected":""}">
       ${src
         ? `<img class="ds-thumb" src="${src}" data-src="${escape(src)}" data-caption="${escape(r.food||"")}" loading="lazy" referrerpolicy="no-referrer" title="click to expand" onerror="this.outerHTML='<div class=\\'ds-thumb ds-thumb-err\\' title=\\'failed to load\\'>×</div>'" />`
         : `<div class="ds-thumb ds-thumb-empty" title="no image url — set the URL template on this dataset">∅</div>`}
       <div class="ds-row-body">
-        <div><strong>${escape(r.food||"—")}</strong></div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <strong>${escape(r.food||"—")}</strong>
+          ${versionPill}
+        </div>
         <div class="muted small">row ${r.row_idx}${r.image_id?` · id ${escape(r.image_id.slice(0,18))}…`:""}</div>
         <div class="ds-nut">
           ${cells.map(([k,v]) => `<span class="ds-nut-cell"><span class="muted small">${k}</span><span class="num">${v??"—"}</span></span>`).join("")}

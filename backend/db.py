@@ -32,8 +32,8 @@ def init_db() -> None:
             """, (time.time(),))
         except Exception:
             pass
-        # Corrections table: per-(dataset, image_id) overlay so the source Excel
-        # stays pristine while users can correct/promote ground truth at row level.
+        # Corrections table: current state — per-(dataset, image_id) overlay
+        # applied at parse time. Source Excel is never modified.
         c.execute("""
             CREATE TABLE IF NOT EXISTS corrections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,6 +48,67 @@ def init_db() -> None:
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_corrections_ds ON corrections(dataset_id)")
+
+        # Append-only audit log of every change to the truth, per dataset.
+        # version_after is a per-dataset monotonic counter (v0 = original Excel,
+        # each save/delete/restore increments). action is one of:
+        #   create / update / delete / restore
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS correction_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id INTEGER NOT NULL,
+                image_id TEXT NOT NULL,
+                truth_json TEXT,
+                prev_truth_json TEXT,
+                action TEXT NOT NULL,
+                version_after INTEGER NOT NULL,
+                source_run_id INTEGER,
+                source_row_idx INTEGER,
+                note TEXT,
+                created_at REAL NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_history_ds  ON correction_history(dataset_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_history_img ON correction_history(dataset_id, image_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_history_v   ON correction_history(dataset_id, version_after)")
+
+        # Backfill: any corrections row without a history entry gets one (version 1+).
+        try:
+            orphans = c.execute("""
+                SELECT c.* FROM corrections c
+                LEFT JOIN correction_history h
+                  ON h.dataset_id = c.dataset_id AND h.image_id = c.image_id
+                WHERE h.id IS NULL
+                ORDER BY c.dataset_id, c.created_at, c.id
+            """).fetchall()
+            cursor_versions: dict[int, int] = {}
+            for row in orphans:
+                ds = row["dataset_id"]
+                if ds not in cursor_versions:
+                    r = c.execute(
+                        "SELECT MAX(version_after) AS v FROM correction_history WHERE dataset_id=?",
+                        (ds,)).fetchone()
+                    cursor_versions[ds] = (r["v"] or 0)
+                cursor_versions[ds] += 1
+                c.execute("""
+                    INSERT INTO correction_history
+                      (dataset_id, image_id, truth_json, prev_truth_json, action,
+                       version_after, source_run_id, source_row_idx, note, created_at)
+                    VALUES (?,?,?,NULL,?,?,?,?,?,?)
+                """, (ds, row["image_id"], row["truth_json"], "create",
+                      cursor_versions[ds], row["source_run_id"],
+                      row["source_row_idx"], row["note"] or "(backfilled)",
+                      row["created_at"]))
+        except Exception:
+            pass
+
+        # Migration: runs.dataset_version
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(runs)").fetchall()]
+            if cols and "dataset_version" not in cols:
+                c.execute("ALTER TABLE runs ADD COLUMN dataset_version INTEGER DEFAULT 0")
+        except Exception:
+            pass
         # cheap migrations
         try:
             cols = [r[1] for r in c.execute("PRAGMA table_info(datasets)").fetchall()]
@@ -321,6 +382,57 @@ def delete_run(run_id: int) -> dict:
         return {"deleted": True, "run_id": run_id}
 
 
+def current_dataset_version(dataset_id: int) -> int:
+    """Latest version number for this dataset (max version_after in history)."""
+    with _conn() as c:
+        r = c.execute(
+            "SELECT MAX(version_after) AS v FROM correction_history WHERE dataset_id=?",
+            (dataset_id,)).fetchone()
+        return int(r["v"] or 0) if r else 0
+
+
+def list_dataset_versions(dataset_id: int) -> list[dict]:
+    """Every history entry, oldest-first. v0 (the source Excel) is implicit."""
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT * FROM correction_history WHERE dataset_id=?
+            ORDER BY version_after, id
+        """, (dataset_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_image_history(dataset_id: int, image_id: str) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT * FROM correction_history
+            WHERE dataset_id=? AND image_id=?
+            ORDER BY version_after, id
+        """, (dataset_id, image_id)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def replay_history(dataset_id: int, at_version: int) -> dict:
+    """Walk history up to and including at_version, return
+    {image_id: <truth dict>}. Items deleted by that version are absent."""
+    import json as _json
+    state: dict = {}
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT image_id, truth_json, action FROM correction_history
+            WHERE dataset_id=? AND version_after<=?
+            ORDER BY version_after, id
+        """, (dataset_id, at_version)).fetchall()
+    for r in rows:
+        if r["action"] == "delete":
+            state.pop(r["image_id"], None)
+        else:
+            try:
+                state[r["image_id"]] = _json.loads(r["truth_json"] or "{}")
+            except Exception:
+                pass
+    return state
+
+
 def list_corrections(dataset_id: int) -> list[dict]:
     with _conn() as c:
         rows = c.execute(
@@ -341,7 +453,29 @@ def upsert_correction(dataset_id: int, image_id: str, truth_json: str,
                       source_run_id: Optional[int] = None,
                       source_row_idx: Optional[int] = None,
                       note: Optional[str] = None) -> dict:
+    """Save a correction AND append to history, bumping dataset_version by 1."""
+    now = time.time()
     with _conn() as c:
+        # Read previous state (for diff history)
+        prev = c.execute(
+            "SELECT truth_json FROM corrections WHERE dataset_id=? AND image_id=?",
+            (dataset_id, image_id)).fetchone()
+        prev_truth = prev["truth_json"] if prev else None
+        action = "update" if prev else "create"
+        # Compute new version inside the transaction
+        v_row = c.execute(
+            "SELECT MAX(version_after) AS v FROM correction_history WHERE dataset_id=?",
+            (dataset_id,)).fetchone()
+        new_version = (v_row["v"] or 0) + 1
+        # Append history
+        c.execute("""
+            INSERT INTO correction_history
+              (dataset_id, image_id, truth_json, prev_truth_json, action,
+               version_after, source_run_id, source_row_idx, note, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (dataset_id, image_id, truth_json, prev_truth, action,
+              new_version, source_run_id, source_row_idx, note, now))
+        # Upsert current state
         c.execute("""
             INSERT INTO corrections (dataset_id, image_id, truth_json,
                                      source_run_id, source_row_idx, note, created_at)
@@ -353,20 +487,102 @@ def upsert_correction(dataset_id: int, image_id: str, truth_json: str,
                 note = excluded.note,
                 created_at = excluded.created_at
         """, (dataset_id, image_id, truth_json, source_run_id, source_row_idx,
-              note, time.time()))
+              note, now))
         r = c.execute(
             "SELECT * FROM corrections WHERE dataset_id=? AND image_id=?",
             (dataset_id, image_id)).fetchone()
-        return dict(r)
+        out = dict(r)
+        out["dataset_version"] = new_version
+        out["action"] = action
+        return out
 
 
 def delete_correction(correction_id: int) -> dict:
+    """Delete a correction AND append to history with action='delete'."""
+    now = time.time()
     with _conn() as c:
         r = c.execute("SELECT * FROM corrections WHERE id=?", (correction_id,)).fetchone()
         if not r:
             return {"deleted": False, "reason": "not found"}
+        ds = r["dataset_id"]; img = r["image_id"]; prev_truth = r["truth_json"]
+        v_row = c.execute(
+            "SELECT MAX(version_after) AS v FROM correction_history WHERE dataset_id=?",
+            (ds,)).fetchone()
+        new_version = (v_row["v"] or 0) + 1
+        c.execute("""
+            INSERT INTO correction_history
+              (dataset_id, image_id, truth_json, prev_truth_json, action,
+               version_after, note, created_at)
+            VALUES (?,?,NULL,?,?,?,?,?)
+        """, (ds, img, prev_truth, "delete", new_version, "deleted", now))
         c.execute("DELETE FROM corrections WHERE id=?", (correction_id,))
-        return {"deleted": True, "correction_id": correction_id}
+        return {"deleted": True, "correction_id": correction_id,
+                "dataset_id": ds, "dataset_version": new_version}
+
+
+def restore_dataset_to_version(dataset_id: int, target_version: int,
+                                note: Optional[str] = None) -> dict:
+    """Roll the active corrections set forward/backward to match target_version.
+
+    Walks the diff between current state and target state, writes one history
+    entry per affected image_id (action='restore'), and rewrites the
+    corrections table. Bumps version exactly once (single 'restore' op).
+    """
+    import json as _json
+    now = time.time()
+    note = note or f"restore to v{target_version}"
+    with _conn() as c:
+        # Snapshot of current corrections
+        cur_rows = c.execute(
+            "SELECT image_id, truth_json FROM corrections WHERE dataset_id=?",
+            (dataset_id,)).fetchall()
+        cur = {r["image_id"]: r["truth_json"] for r in cur_rows}
+    target = replay_history(dataset_id, target_version)
+    target_json = {k: __import__("json").dumps(v) for k, v in target.items()}
+
+    affected_images: set = set(cur.keys()) | set(target_json.keys())
+    if not affected_images:
+        return {"restored": True, "dataset_id": dataset_id,
+                "target_version": target_version, "new_version": current_dataset_version(dataset_id),
+                "n_changed": 0}
+
+    with _conn() as c:
+        v_row = c.execute(
+            "SELECT MAX(version_after) AS v FROM correction_history WHERE dataset_id=?",
+            (dataset_id,)).fetchone()
+        new_version = (v_row["v"] or 0) + 1
+        n_changed = 0
+        for img in sorted(affected_images):
+            cur_t = cur.get(img)
+            tgt_t = target_json.get(img)
+            if cur_t == tgt_t:
+                continue
+            n_changed += 1
+            # Write history
+            c.execute("""
+                INSERT INTO correction_history
+                  (dataset_id, image_id, truth_json, prev_truth_json, action,
+                   version_after, note, created_at)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (dataset_id, img, tgt_t, cur_t, "restore",
+                  new_version, note, now))
+            # Apply to corrections table
+            if tgt_t is None:
+                c.execute("DELETE FROM corrections WHERE dataset_id=? AND image_id=?",
+                          (dataset_id, img))
+            else:
+                c.execute("""
+                    INSERT INTO corrections (dataset_id, image_id, truth_json, created_at)
+                    VALUES (?,?,?,?)
+                    ON CONFLICT(dataset_id, image_id) DO UPDATE SET
+                        truth_json = excluded.truth_json,
+                        created_at = excluded.created_at
+                """, (dataset_id, img, tgt_t, now))
+        if n_changed == 0:
+            new_version -= 1   # nothing changed; don't bump version
+    return {"restored": True, "dataset_id": dataset_id,
+            "target_version": target_version, "new_version": new_version,
+            "n_changed": n_changed}
 
 
 def leaderboard(prompt_id: int) -> list[dict]:

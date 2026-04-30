@@ -928,6 +928,83 @@ optgroup { font-style: normal; font-weight: 600; color: var(--muted); }
 }
 .te-ing-detail .label { margin-top: 0; font-size: 9.5px; }
 
+/* =====================================================================
+   Dataset versioning UI — version pills, timeline, image history
+   ===================================================================== */
+
+.version-pill {
+  display: inline-flex; align-items: center;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  background: var(--copper-soft); color: var(--copper-deep);
+  border: 1px solid rgba(204,120,92,0.32);
+  padding: 1px 8px; border-radius: var(--radius-pill);
+  cursor: pointer; transition: all var(--t-fast) var(--ease);
+}
+.version-pill:hover {
+  background: var(--copper); color: #fff; border-color: var(--copper-deep);
+}
+
+.ds-row-corrected {
+  border-left: 3px solid var(--copper);
+}
+
+/* Version timeline */
+.version-timeline { display: flex; flex-direction: column; gap: 4px; }
+.vt-row {
+  display: grid; grid-template-columns: 56px 1fr auto;
+  gap: 12px; padding: 10px 12px;
+  border: 1px solid var(--hairline); border-radius: var(--radius-2);
+  background: var(--paper);
+  align-items: center;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.vt-row:hover { border-color: var(--hairline-strong); }
+.vt-row-current {
+  background: var(--copper-soft);
+  border-color: var(--copper);
+}
+.vt-row-base {
+  background: var(--paper-2);
+}
+.vt-v {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  color: var(--copper-deep);
+  letter-spacing: 0.04em;
+}
+.vt-row-current .vt-v { color: var(--copper-deep); }
+.vt-meta strong { font-weight: 600; }
+.vt-actions { display: flex; gap: 6px; align-items: center; }
+
+/* Image history */
+.image-history { display: flex; flex-direction: column; gap: 8px; }
+.ih-entry {
+  border: 1px solid var(--hairline); border-radius: var(--radius-2);
+  background: var(--paper); padding: 10px 12px;
+}
+.ih-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.ih-diff { font-size: 12px; }
+.ih-field {
+  display: grid; grid-template-columns: 100px 1fr;
+  gap: 8px; padding: 4px 0;
+  border-bottom: 1px dashed var(--hairline);
+}
+.ih-field:last-child { border-bottom: 0; }
+.ih-old { color: var(--muted); text-decoration: line-through; }
+.ih-new { color: var(--ink); font-weight: 500; }
+.ih-macros { width: 100%; margin-top: 6px; border-collapse: collapse; }
+.ih-macros th, .ih-macros td {
+  padding: 4px 6px; font-size: 11.5px; border-bottom: 1px solid var(--hairline);
+}
+.ih-macros th {
+  font-family: var(--mono); font-size: 10px;
+  text-transform: lowercase; color: var(--muted);
+  letter-spacing: 0;
+}
+
 /* Drawer (full-screen run detail when clicking from leaderboard) */
 .run-drawer {
   position: fixed; inset: 0; z-index: 900;
