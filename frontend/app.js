@@ -31,6 +31,9 @@ const api = {
   leaderboard: (pid)   => fetch(`/api/leaderboard/${pid}`).then(r => r.json()),
   filteredRuns:(q)     => fetch("/api/runs?" + new URLSearchParams(q || {}).toString()).then(r => r.json()),
   compare:     (ids)   => fetch(`/api/compare?ids=${ids.join(",")}`).then(r => r.json()),
+  corrections: (dsId)  => fetch(`/api/corrections?dataset_id=${dsId}`).then(r => r.json()),
+  saveCorrection: (b)  => fetch("/api/corrections", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b)}).then(r => r.json()),
+  delCorrection:  (id) => fetch(`/api/corrections/${id}`, {method:"DELETE"}).then(r => r.json()),
 };
 
 const LB = { selected: new Set(), filters: {provider:"", model_id:"", prompt_id:"", dataset_id:"", status:""}, bestOnly: false, runs: [] };
@@ -275,29 +278,58 @@ async function reloadLeaderboardTable() {
         <th></th>
       </tr></thead>
       <tbody>
-      ${runs.map((r,i) => `<tr ${LB.selected.has(r.id)?'class="lb-selected"':''}>
-        <td><input type="checkbox" data-run-id="${r.id}" ${LB.selected.has(r.id)?'checked':''} onchange="toggleSelected(event)" /></td>
-        <td class="num">${r.id}</td>
+      ${runs.map((r,i) => `<tr ${LB.selected.has(r.id)?'class="lb-selected"':''} class="lb-row" data-run-id="${r.id}">
+        <td onclick="event.stopPropagation()"><input type="checkbox" data-run-id="${r.id}" ${LB.selected.has(r.id)?'checked':''} onchange="toggleSelected(event)" /></td>
+        <td class="num lb-id">#${r.id}</td>
         <td><span class="pill ${r.status==='completed'?'ok':r.status==='failed'?'err':r.status==='cancelled'?'err':'run'}">${r.status}</span></td>
         <td><span class="pill">${escape(r.provider)}</span></td>
         <td><strong>${escape(r.model_id)}</strong></td>
         <td class="small">${escape(r.prompt_name||"")}</td>
         <td class="small">${escape(r.dataset_name||"")}</td>
-        <td>
-          <div class="num">${(r.composite_score||0).toFixed(1)}</div>
-          <div class="bar"><span style="width:${Math.min(100, r.composite_score||0)}%"></span></div>
-        </td>
+        <td>${renderBullet(r.composite_score||0)}</td>
         <td class="num">${((r.accuracy||0)*100).toFixed(1)}%</td>
         <td class="num">${((r.avg_latency_ms||0)/1000).toFixed(2)}s</td>
         <td class="num">${fmtNum(r.total_input_tokens||0)} / ${fmtNum(r.total_output_tokens||0)}</td>
         <td class="num">$${(r.total_cost_usd||0).toFixed(4)}</td>
         <td class="num">${r.n_done}/${r.n_rows}</td>
-        <td><button class="link-btn" title="Delete this run" onclick="deleteRunSingle(${r.id})">delete</button></td>
+        <td onclick="event.stopPropagation()"><button class="link-btn" title="Delete this run" onclick="deleteRunSingle(${r.id})">delete</button></td>
       </tr>`).join("")}
       </tbody>
     </table>
   `;
   renderActionBar();
+}
+
+// Bullet chart (Stephen Few): qualitative ranges + central bar + target tick.
+// Used for composite score across leaderboard + compare cards.
+function renderBullet(value, target = 80, max = 100) {
+  const v = Math.max(0, Math.min(max, value));
+  const t = Math.max(0, Math.min(max, target));
+  return `
+    <div class="bullet" title="composite ${v.toFixed(1)} · target ${t}">
+      <div class="bullet-track">
+        <div class="bullet-q1" style="width:${33.33}%"></div>
+        <div class="bullet-q2" style="width:${33.33}%"></div>
+        <div class="bullet-q3" style="width:${33.34}%"></div>
+        <div class="bullet-bar" style="width:${v}%"></div>
+        <div class="bullet-target" style="left:${t}%"></div>
+      </div>
+      <div class="bullet-val num">${v.toFixed(1)}</div>
+    </div>`;
+}
+
+// 7-dot per-nutrient sparkline (Tufte). Colors track the score.
+function renderNutrientSpark(perNut) {
+  if (!perNut) return "";
+  const order = ["calories","protein_g","carbs_g","fat_g","fiber_g","sugar_g","sodium_mg"];
+  return `<div class="spark" title="cal · prot · carbs · fat · fib · sug · Na">${
+    order.map(k => {
+      const v = perNut[k];
+      if (v == null) return `<span class="spark-dot spark-empty" title="${k}: —"></span>`;
+      const cls = v>=0.85 ? "spark-ok" : v>=0.5 ? "spark-mid" : "spark-low";
+      return `<span class="spark-dot ${cls}" title="${k}: ${(v*100).toFixed(0)}%"></span>`;
+    }).join("")
+  }</div>`;
 }
 
 function toggleSelected(e) {
@@ -309,6 +341,16 @@ function toggleSelected(e) {
   if (tr) tr.classList.toggle("lb-selected", e.target.checked);
   renderActionBar();
 }
+
+// Click anywhere on a leaderboard row (except checkbox / delete link) → detail
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (t && t.closest && t.closest(".lb-row")) {
+    const tr = t.closest(".lb-row");
+    const runId = parseInt(tr.dataset.runId);
+    if (runId) openRunDetailDrawer(runId);
+  }
+});
 function toggleAllSelected(e) {
   if (e.target.checked) LB.runs.forEach(r => LB.selected.add(r.id));
   else LB.selected.clear();
@@ -428,22 +470,76 @@ function renderCompare(d) {
     </div>`;
   }).join("");
 
-  // Per-nutrient comparison table
+  // Per-nutrient heatmap (Stephen Few): backgrounds carry the magnitude,
+  // numbers carry the precision.
   const nuts = ["calories","protein_g","carbs_g","fat_g","fiber_g","sugar_g","sodium_mg"];
+  const heatBg = v => {
+    if (v == null) return "transparent";
+    if (v >= 0.85) return `rgba(91,122,79,${0.10 + 0.50*(v-0.85)/0.15})`;       // green
+    if (v >= 0.5)  return `rgba(204,120,92,${0.10 + 0.30*(v-0.5)/0.35})`;       // copper
+    return `rgba(160,74,60,${0.12 + 0.30*(0.5-v)/0.5})`;                        // red
+  };
   const nutTable = `
-    <table class="cmp-table">
-      <thead><tr><th>Nutrient</th>${runs.map(r => `<th class="num">#${r.id}</th>`).join("")}</tr></thead>
+    <table class="cmp-table heatmap-table">
+      <thead><tr><th>Nutrient</th>${runs.map(r => `<th class="num">#${r.id} · ${escape(r.model_id)}</th>`).join("")}</tr></thead>
       <tbody>
       ${nuts.map(n => `<tr>
         <td>${n}</td>
         ${runs.map(r => {
           const v = r.aggregates.per_nutrient[n];
-          const c = v==null?"var(--muted)":v>=0.85?"var(--green)":v>=0.5?"var(--copper)":"var(--red)";
-          return `<td class="num" style="color:${c}">${fmtPct(v)}</td>`;
+          return `<td class="num heat-cell" style="background:${heatBg(v)}">${fmtPct(v)}</td>`;
         }).join("")}
       </tr>`).join("")}
       </tbody>
     </table>`;
+
+  // Slope graph (Tufte): each metric becomes a slope line across the runs.
+  // Reads at-a-glance which dimensions improved / regressed across versions.
+  const slopeMetrics = [
+    {key: "accuracy",      label: "Accuracy",     get: r => r.accuracy},
+    {key: "macros_avg",    label: "Macros",       get: r => r.aggregates.macros_avg},
+    {key: "ingredient_f1", label: "Ing F1",       get: r => r.aggregates.ingredient_f1},
+    {key: "weight_acc",    label: "Weights",      get: r => r.aggregates.weight_acc},
+    {key: "health_acc",    label: "Health",       get: r => r.aggregates.health_acc},
+  ];
+  const slopeWidth = 80; // px per run column
+  const slopePad = 100;  // left label, right label
+  const slopeH = 220;
+  const slopeW = slopePad*2 + slopeWidth*(runs.length-1);
+  const slopeChart = `
+    <div class="slope-wrap">
+      <svg width="${slopeW}" height="${slopeH}" class="slope-svg" viewBox="0 0 ${slopeW} ${slopeH}">
+        <!-- background grid -->
+        ${[0.25, 0.5, 0.75, 1.0].map(y => {
+          const yy = 30 + (1-y)*(slopeH-50);
+          return `<line x1="${slopePad}" x2="${slopeW-slopePad}" y1="${yy}" y2="${yy}" stroke="var(--hairline)" stroke-dasharray="2,3"/>
+                  <text x="${slopePad-8}" y="${yy+3}" text-anchor="end" font-size="10" fill="var(--muted)" font-family="var(--mono)">${(y*100).toFixed(0)}%</text>`;
+        }).join("")}
+        <!-- run column labels -->
+        ${runs.map((r,i) => {
+          const x = slopePad + i*slopeWidth;
+          return `<text x="${x}" y="20" text-anchor="middle" font-size="10" fill="var(--muted)" font-family="var(--mono)">#${r.id}</text>
+                  <text x="${x}" y="${slopeH-6}" text-anchor="middle" font-size="9" fill="var(--ink-2)" font-family="var(--sans)">${escape((r.model_id||"").slice(0,16))}</text>`;
+        }).join("")}
+        <!-- one polyline per metric -->
+        ${slopeMetrics.map((m, mi) => {
+          const colors = ["var(--copper)","var(--ink)","var(--copper-deep)","var(--green)","#7a6e8c"];
+          const c = colors[mi % colors.length];
+          const pts = runs.map((r, i) => {
+            const v = m.get(r) || 0;
+            return [slopePad + i*slopeWidth, 30 + (1-v)*(slopeH-50)];
+          });
+          const poly = pts.map(p => p.join(",")).join(" ");
+          // Right label
+          const last = pts[pts.length-1];
+          return `
+            <polyline points="${poly}" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            ${pts.map(p => `<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="${c}"/>`).join("")}
+            <text x="${last[0]+8}" y="${last[1]+3}" font-size="10" fill="${c}" font-family="var(--sans)" font-weight="600">${escape(m.label)}</text>
+          `;
+        }).join("")}
+      </svg>
+    </div>`;
 
   // Biggest swings table
   const swings = d.biggest_swings || [];
@@ -486,7 +582,12 @@ function renderCompare(d) {
         </div>
       </div>
       <div class="cmp-grid">${cards}</div>
-      <h4 style="margin:18px 0 8px">Per-nutrient accuracy</h4>
+
+      <h4 style="margin:18px 0 8px" class="cmp-h">Metric trajectory across selected runs</h4>
+      <div class="muted small" style="margin-bottom:6px">A slope graph (Tufte) — each line is one metric, each column one run. Up = better.</div>
+      ${slopeChart}
+
+      <h4 style="margin:18px 0 8px" class="cmp-h">Per-nutrient accuracy heatmap</h4>
       ${nutTable}
       ${swingsTable}
     </div>`;
@@ -796,25 +897,59 @@ async function showRun(id) {
   $("#runs-list").innerHTML = renderReview(r);
 }
 
+// Drawer-style detail view that opens from anywhere (leaderboard, runs).
+// Shares the REVIEW state with showRun().
+function openRunDetailDrawer(id) {
+  let drawer = document.getElementById("run-drawer");
+  if (!drawer) {
+    drawer = document.createElement("div");
+    drawer.id = "run-drawer";
+    drawer.className = "run-drawer hidden";
+    drawer.innerHTML = `
+      <div class="run-drawer-backdrop"></div>
+      <div class="run-drawer-panel">
+        <div class="run-drawer-head">
+          <h3 id="run-drawer-title" style="margin:0">Loading…</h3>
+          <button class="btn-ghost" onclick="closeRunDrawer()">✕ Close</button>
+        </div>
+        <div class="run-drawer-body" id="run-drawer-body"></div>
+      </div>`;
+    document.body.appendChild(drawer);
+    drawer.querySelector(".run-drawer-backdrop").onclick = closeRunDrawer;
+  }
+  drawer.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  loadRunDrawer(id);
+}
+
+async function loadRunDrawer(id) {
+  REVIEW.runId = id;
+  REVIEW.expandedRows = new Set();
+  REVIEW.rawExpanded = new Set();
+  const body = document.getElementById("run-drawer-body");
+  body.innerHTML = `<p class="muted">Loading run #${id}…</p>`;
+  let r;
+  try { r = await api.run(id); } catch (e) {
+    body.innerHTML = `<div class="error-box">${escape(String(e))}</div>`; return;
+  }
+  REVIEW.model_id = r.model_id || "";
+  document.getElementById("run-drawer-title").textContent =
+    `Run #${r.id} · ${r.model_id} · ${r.status}`;
+  body.innerHTML = renderReviewBody(r);
+}
+
+function closeRunDrawer() {
+  const drawer = document.getElementById("run-drawer");
+  if (drawer) drawer.classList.add("hidden");
+  document.body.style.overflow = "";
+  REVIEW.runId = null;
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeRunDrawer();
+});
+
 function renderReview(r) {
-  const rows = r.rows || [];
-  const fmtPct = v => v == null ? "—" : `${(v*100).toFixed(1)}%`;
-  const accAvg = avgFromRows(rows, "macros_avg");
-  const f1Avg  = avgFromRows(rows, "ingredient_f1");
-  const wAvg   = avgFromRows(rows, "weight_acc");
-  const hAvg   = avgFromRows(rows, "health.score");
-
-  const stats = `
-    <div class="stat-row">
-      ${_statBox("Composite", `${(r.composite_score||0).toFixed(1)}`, _color((r.composite_score||0)/100))}
-      ${_statBox("Accuracy",  fmtPct(r.accuracy),  _color(r.accuracy||0))}
-      ${_statBox("Macros",    fmtPct(accAvg),       _color(accAvg))}
-      ${_statBox("Ing F1",    fmtPct(f1Avg),        _color(f1Avg))}
-      ${_statBox("Weights",   fmtPct(wAvg),         _color(wAvg))}
-      ${_statBox("Health",    fmtPct(hAvg),         _color(hAvg))}
-      ${_statBox("Cost",      `$${(r.total_cost_usd||0).toFixed(4)}`, "var(--ink)")}
-    </div>`;
-
   const head = `
     <div class="card">
       <div class="row-between" style="align-items:center;margin-bottom:6px">
@@ -825,20 +960,55 @@ function renderReview(r) {
         <button class="btn-ghost" onclick="refreshRuns()">← back to all runs</button>
       </div>
       ${r.error ? `<div class="error-box">${escape(r.error)}</div>` : ""}
-      ${stats}
+      ${renderReviewStats(r)}
     </div>
   `;
+  return head + `<div id="review-rows">${renderReviewRowList(r)}</div>`;
+}
 
-  return head + `
-    <div id="review-rows">
-      ${rows.length === 0 ? `<p class="muted">No rows.</p>` :
-        rows.map(rr => renderRowCard(rr, {
-          state: REVIEW,
-          modelId: r.model_id,
-          toggleFn: toggleReviewRow,
-        })).join("")}
+// Used by the drawer (no "back to all runs" button)
+function renderReviewBody(r) {
+  return `
+    <div class="card" style="margin-bottom:12px">
+      ${r.error ? `<div class="error-box">${escape(r.error)}</div>` : ""}
+      <div class="muted small" style="margin-bottom:10px">
+        ${escape(r.prompt_name||"")} · ${escape(r.provider)} · ${r.n_done}/${r.n_rows} rows · ${(r.avg_latency_ms/1000||0).toFixed(2)}s/row · ${fmtNum(r.total_input_tokens)} in / ${fmtNum(r.total_output_tokens)} out
+      </div>
+      ${renderReviewStats(r)}
     </div>
+    <div id="review-rows">${renderReviewRowList(r)}</div>
   `;
+}
+
+function renderReviewStats(r) {
+  const rows = r.rows || [];
+  const fmtPct = v => v == null ? "—" : `${(v*100).toFixed(1)}%`;
+  const accAvg = avgFromRows(rows, "macros_avg");
+  const f1Avg  = avgFromRows(rows, "ingredient_f1");
+  const wAvg   = avgFromRows(rows, "weight_acc");
+  const hAvg   = avgFromRows(rows, "health.score");
+  return `
+    <div class="stat-row">
+      ${_statBox("Composite", `${(r.composite_score||0).toFixed(1)}`, _color((r.composite_score||0)/100))}
+      ${_statBox("Accuracy",  fmtPct(r.accuracy),  _color(r.accuracy||0))}
+      ${_statBox("Macros",    fmtPct(accAvg),       _color(accAvg))}
+      ${_statBox("Ing F1",    fmtPct(f1Avg),        _color(f1Avg))}
+      ${_statBox("Weights",   fmtPct(wAvg),         _color(wAvg))}
+      ${_statBox("Health",    fmtPct(hAvg),         _color(hAvg))}
+      ${_statBox("Cost",      `$${(r.total_cost_usd||0).toFixed(4)}`, "var(--ink)")}
+    </div>`;
+}
+
+function renderReviewRowList(r) {
+  const rows = r.rows || [];
+  if (rows.length === 0) return `<p class="muted">No rows.</p>`;
+  return rows.map(rr => renderRowCard(rr, {
+    state: REVIEW,
+    modelId: r.model_id,
+    toggleFn: toggleReviewRow,
+    runId: r.id,
+    datasetId: r.dataset_id,
+  })).join("");
 }
 
 function avgFromRows(rows, key) {
@@ -1160,6 +1330,78 @@ function renderActiveRun(r) {
   return summary + detail;
 }
 
+function renderPromoteToTruth(rr, runId, datasetId) {
+  // Image id from image_ref (S3 URLs end with the id). For local-only datasets
+  // (no template) we can't safely identify the row across re-uploads, so disable.
+  const ref = rr.image_ref || "";
+  const imageId = ref.startsWith("http") ? ref.split("/").pop() : ref;
+  if (!imageId || !datasetId) return "";
+  return `
+    <div class="promote-row">
+      <div class="muted small">
+        Disagree with the benchmark? Promote the model's prediction as the new truth for this image —
+        future runs against this dataset will score against the corrected truth (the original Excel is untouched).
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button class="btn-ghost" onclick="promoteToTruth(${rr.id}, ${runId}, ${datasetId}, '${escape(imageId)}', 'pred')">
+          ⤴ Save model output as truth
+        </button>
+        <button class="btn-ghost" onclick="promoteToTruth(${rr.id}, ${runId}, ${datasetId}, '${escape(imageId)}', 'edit')">
+          ✎ Edit truth manually
+        </button>
+        <span class="muted small" id="promote-status-${rr.row_idx}"></span>
+      </div>
+    </div>`;
+}
+
+async function promoteToTruth(rowResultId, runId, datasetId, imageId, mode) {
+  // Fetch the row's parsed output to use as the new truth payload
+  const run = await api.run(runId);
+  const rr = (run.rows || []).find(x => x.id === rowResultId);
+  if (!rr) return toast("Row not found.");
+  const op = JSON.parse(rr.output_parsed || "{}");
+  let payload = {
+    food: op.food || null,
+    description: op.description || null,
+    nutrition: op.nutrition || {},
+    ingredients: op.ingredients || [],
+    health_score: op.health_score || null,
+  };
+  let note = `Promoted from run #${runId} row ${rr.row_idx}`;
+
+  if (mode === "edit") {
+    // Open a simple JSON editor in a prompt-style dialog
+    const cur = JSON.stringify(payload, null, 2);
+    const edited = prompt(
+      "Edit the truth JSON for this row. The keys here MUST stay as-is.\n" +
+      "(food, description, nutrition, ingredients, health_score)",
+      cur
+    );
+    if (edited === null) return;
+    try { payload = JSON.parse(edited); } catch (e) {
+      return toast("Invalid JSON: " + e.message);
+    }
+    note = "Edited manually";
+  }
+
+  const status = document.getElementById(`promote-status-${rr.row_idx}`);
+  if (status) status.textContent = "saving…";
+  try {
+    const res = await api.saveCorrection({
+      dataset_id: datasetId,
+      image_id: imageId,
+      truth: payload,
+      source_run_id: runId,
+      source_row_idx: rr.row_idx,
+      note,
+    });
+    if (status) status.innerHTML = `<span class="pill ok">✓ saved (correction #${res.id})</span>`;
+    toast("Truth correction saved. Next run picks it up.");
+  } catch (e) {
+    if (status) status.textContent = "save failed: " + e.message;
+  }
+}
+
 function _pct(v) { return (v*100).toFixed(1)+"%"; }
 function _color(v) { return v>=0.85?"var(--green)":v>=0.5?"var(--copper)":"var(--red)"; }
 function _statBox(label, value, color) {
@@ -1170,11 +1412,12 @@ function _statBox(label, value, color) {
 }
 
 function renderRowCard(rr, opts) {
-  // opts: {state: {expandedRows, rawExpanded}, modelId, toggleFn}
-  // Defaults wire it to ACTIVE for the live poll view.
+  // opts: {state, modelId, toggleFn, runId, datasetId}
   const state    = (opts && opts.state)    || ACTIVE;
   const modelId  = (opts && opts.modelId)  || rr.run_model_id || "";
   const toggleFn = (opts && opts.toggleFn) || (idx => toggleRow(idx));
+  const runId    = (opts && opts.runId)    || ACTIVE.runId;
+  const datasetId= (opts && opts.datasetId);
 
   const sc = JSON.parse(rr.scores||"{}");
   const op = JSON.parse(rr.output_parsed||"{}");
@@ -1332,6 +1575,7 @@ function renderRowCard(rr, opts) {
             </div>
             ${ingTable}
           `}
+          ${renderPromoteToTruth(rr, runId, datasetId)}
           <details style="margin-top:14px" ${state.rawExpanded.has(rr.row_idx) ? "open" : ""}
                    ontoggle="onRawToggle(event, ${rr.row_idx})">
             <summary class="muted small" style="cursor:pointer">Raw model response</summary>

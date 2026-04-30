@@ -200,8 +200,53 @@ def _extract_xlsx_images(ws, images_dir: Path) -> dict[int, str]:
 _PARSE_CACHE: dict = {}
 
 
+def _apply_corrections(rows: list[dict], dataset_id: int | None) -> int:
+    """Apply per-(dataset_id, image_id) corrections from the corrections table.
+
+    Mutates rows in place; returns count of rows touched.  Each correction
+    holds the full canonical truth payload (food / description / nutrition /
+    ingredients / health_score) that overrides the original Excel for that
+    image. The original file is never modified.
+    """
+    if not dataset_id:
+        return 0
+    try:
+        from . import db
+    except ImportError:
+        return 0
+    import json as _json
+    n = 0
+    for row in rows:
+        img_id = row.get("image_id") or row.get("image_path")
+        if not img_id:
+            continue
+        # Match by image_id OR by row_idx fallback
+        c = db.get_correction(dataset_id, str(img_id))
+        if not c:
+            continue
+        try:
+            payload = _json.loads(c["truth_json"])
+        except Exception:
+            continue
+        if payload.get("food") is not None:
+            row["food"] = payload["food"]
+        if payload.get("description") is not None:
+            row["description"] = payload["description"]
+        if isinstance(payload.get("nutrition"), dict):
+            row["nutrition_truth"] = {**(row.get("nutrition_truth") or {}),
+                                      **payload["nutrition"]}
+        if isinstance(payload.get("ingredients"), list) and payload["ingredients"]:
+            row["ingredients_truth"] = payload["ingredients"]
+        if payload.get("health_score") is not None:
+            row["health_score_truth"] = payload["health_score"]
+        row["_corrected"] = True
+        n += 1
+    return n
+
+
 def parse_dataset(file_path: str | Path, images_dir: str | Path = "data/images",
-                  image_url_template: str | None = None) -> dict:
+                  image_url_template: str | None = None,
+                  dataset_id: int | None = None) -> dict:
     """Returns {'rows': [...], 'columns_detected': {...}, 'n': N}.
 
     image_url_template: if set, when an image cell holds an opaque id
@@ -213,13 +258,26 @@ def parse_dataset(file_path: str | Path, images_dir: str | Path = "data/images",
     images_dir = Path(images_dir)
     suffix = file_path.suffix.lower()
 
-    cache_key = (str(file_path), str(image_url_template))
+    cache_key = (str(file_path), str(image_url_template), int(dataset_id or 0))
     try:
         mtime = file_path.stat().st_mtime
     except FileNotFoundError:
         mtime = 0
     cached = _PARSE_CACHE.get(cache_key)
-    if cached and cached["mtime"] == mtime:
+    # Invalidate when corrections change too — bump cache by checking
+    # the latest correction created_at for this dataset.
+    correction_ts = 0
+    if dataset_id:
+        try:
+            from . import db as _db
+            with _db._conn() as _c:
+                r = _c.execute(
+                    "SELECT MAX(created_at) AS t FROM corrections WHERE dataset_id=?",
+                    (dataset_id,)).fetchone()
+                correction_ts = r["t"] or 0
+        except Exception:
+            pass
+    if cached and cached["mtime"] == mtime and cached.get("correction_ts", 0) == correction_ts:
         return cached["result"]
 
     image_by_row: dict[int, str] = {}
@@ -302,6 +360,9 @@ def parse_dataset(file_path: str | Path, images_dir: str | Path = "data/images",
                       for k, v in raw.items()}
         rows.append(row)
 
-    result = {"rows": rows, "columns_detected": col_map, "n": len(rows)}
-    _PARSE_CACHE[cache_key] = {"mtime": mtime, "result": result}
+    # Apply corrections overlay AFTER parse, before caching.
+    n_corrected = _apply_corrections(rows, dataset_id)
+    result = {"rows": rows, "columns_detected": col_map, "n": len(rows),
+              "n_corrected": n_corrected}
+    _PARSE_CACHE[cache_key] = {"mtime": mtime, "correction_ts": correction_ts, "result": result}
     return result

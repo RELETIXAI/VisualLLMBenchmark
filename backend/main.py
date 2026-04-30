@@ -161,7 +161,8 @@ async def upload_dataset(file: UploadFile = File(...),
     target = UPLOAD_DIR / file.filename
     with target.open("wb") as f:
         shutil.copyfileobj(file.file, f)
-    parsed = parse_dataset(target, images_dir=IMAGES_DIR, image_url_template=image_url_template)
+    parsed = parse_dataset(target, images_dir=IMAGES_DIR,
+                                  image_url_template=image_url_template)
     ds = db.create_dataset(
         name=name or file.filename,
         file_path=str(target),
@@ -184,7 +185,8 @@ def preview_dataset(dataset_id: int, n: int = 5):
     if not ds:
         raise HTTPException(404, "Not found")
     parsed = parse_dataset(ds["file_path"], images_dir=IMAGES_DIR,
-                           image_url_template=ds.get("image_url_template"))
+                           image_url_template=ds.get("image_url_template"),
+                           dataset_id=ds["id"])
     return {"dataset": ds, "rows": parsed["rows"][:n], "n_total": parsed["n"]}
 
 
@@ -194,7 +196,8 @@ def get_dataset_rows(dataset_id: int, offset: int = 0, limit: int = 20, q: Optio
     if not ds:
         raise HTTPException(404, "Not found")
     parsed = parse_dataset(ds["file_path"], images_dir=IMAGES_DIR,
-                           image_url_template=ds.get("image_url_template"))
+                           image_url_template=ds.get("image_url_template"),
+                           dataset_id=ds["id"])
     rows = parsed["rows"]
     if q:
         ql = q.lower().strip()
@@ -208,6 +211,45 @@ def get_dataset_rows(dataset_id: int, offset: int = 0, limit: int = 20, q: Optio
 @app.delete("/api/datasets/{dataset_id}")
 def delete_dataset(dataset_id: int):
     return db.delete_dataset(dataset_id)
+
+
+# ---------- Corrections (truth overlay) ----------
+class CorrectionIn(BaseModel):
+    dataset_id: int
+    image_id: str
+    truth: dict     # canonical {food, description, nutrition, ingredients, health_score}
+    source_run_id: Optional[int] = None
+    source_row_idx: Optional[int] = None
+    note: Optional[str] = None
+
+
+@app.get("/api/corrections")
+def list_corrections(dataset_id: int):
+    items = db.list_corrections(dataset_id)
+    # decode truth_json for client convenience
+    for c in items:
+        try:
+            c["truth"] = _json.loads(c.get("truth_json") or "{}")
+        except Exception:
+            c["truth"] = {}
+    return items
+
+
+@app.post("/api/corrections")
+def post_correction(c: CorrectionIn):
+    return db.upsert_correction(
+        dataset_id=c.dataset_id,
+        image_id=c.image_id,
+        truth_json=_json.dumps(c.truth),
+        source_run_id=c.source_run_id,
+        source_row_idx=c.source_row_idx,
+        note=c.note,
+    )
+
+
+@app.delete("/api/corrections/{correction_id}")
+def del_correction(correction_id: int):
+    return db.delete_correction(correction_id)
 
 
 class DatasetPatchIn(BaseModel):

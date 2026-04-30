@@ -32,6 +32,22 @@ def init_db() -> None:
             """, (time.time(),))
         except Exception:
             pass
+        # Corrections table: per-(dataset, image_id) overlay so the source Excel
+        # stays pristine while users can correct/promote ground truth at row level.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id INTEGER NOT NULL,
+                image_id TEXT NOT NULL,
+                truth_json TEXT NOT NULL,
+                source_run_id INTEGER,
+                source_row_idx INTEGER,
+                note TEXT,
+                created_at REAL NOT NULL,
+                UNIQUE(dataset_id, image_id)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_corrections_ds ON corrections(dataset_id)")
         # cheap migrations
         try:
             cols = [r[1] for r in c.execute("PRAGMA table_info(datasets)").fetchall()]
@@ -303,6 +319,54 @@ def delete_run(run_id: int) -> dict:
         c.execute("DELETE FROM row_results WHERE run_id=?", (run_id,))
         c.execute("DELETE FROM runs WHERE id=?", (run_id,))
         return {"deleted": True, "run_id": run_id}
+
+
+def list_corrections(dataset_id: int) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM corrections WHERE dataset_id=? ORDER BY id DESC",
+            (dataset_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_correction(dataset_id: int, image_id: str) -> Optional[dict]:
+    with _conn() as c:
+        r = c.execute(
+            "SELECT * FROM corrections WHERE dataset_id=? AND image_id=?",
+            (dataset_id, image_id)).fetchone()
+        return dict(r) if r else None
+
+
+def upsert_correction(dataset_id: int, image_id: str, truth_json: str,
+                      source_run_id: Optional[int] = None,
+                      source_row_idx: Optional[int] = None,
+                      note: Optional[str] = None) -> dict:
+    with _conn() as c:
+        c.execute("""
+            INSERT INTO corrections (dataset_id, image_id, truth_json,
+                                     source_run_id, source_row_idx, note, created_at)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(dataset_id, image_id) DO UPDATE SET
+                truth_json = excluded.truth_json,
+                source_run_id = excluded.source_run_id,
+                source_row_idx = excluded.source_row_idx,
+                note = excluded.note,
+                created_at = excluded.created_at
+        """, (dataset_id, image_id, truth_json, source_run_id, source_row_idx,
+              note, time.time()))
+        r = c.execute(
+            "SELECT * FROM corrections WHERE dataset_id=? AND image_id=?",
+            (dataset_id, image_id)).fetchone()
+        return dict(r)
+
+
+def delete_correction(correction_id: int) -> dict:
+    with _conn() as c:
+        r = c.execute("SELECT * FROM corrections WHERE id=?", (correction_id,)).fetchone()
+        if not r:
+            return {"deleted": False, "reason": "not found"}
+        c.execute("DELETE FROM corrections WHERE id=?", (correction_id,))
+        return {"deleted": True, "correction_id": correction_id}
 
 
 def leaderboard(prompt_id: int) -> list[dict]:

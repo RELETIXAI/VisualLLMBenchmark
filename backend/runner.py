@@ -61,11 +61,13 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
                   weights: dict | None,
                   max_rows: int | None,
                   image_url_template: str | None,
-                  random_sample: bool) -> None:
+                  random_sample: bool,
+                  dataset_id_for_corrections: int | None = None) -> None:
     controls = _get_controls(run_id)
     try:
         import random
-        ds = parse_dataset(dataset_path, image_url_template=image_url_template)
+        ds = parse_dataset(dataset_path, image_url_template=image_url_template,
+                           dataset_id=dataset_id_for_corrections)
         rows = ds["rows"]
         if max_rows and max_rows < len(rows):
             if random_sample:
@@ -179,7 +181,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
                     user_prompt=user_prompt, pricing_override=pricing_override,
                     weights=weights, max_rows=max_rows,
                     image_url_template=dataset.get("image_url_template"),
-                    random_sample=random_sample),
+                    random_sample=random_sample,
+                    dataset_id_for_corrections=dataset["id"]),
     )
     th.start()
     return run_id
