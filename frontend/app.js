@@ -1280,6 +1280,9 @@ async function pollRun(id) {
 }
 
 function renderActiveRun(r) {
+  ACTIVE.runId = r.id;
+  ACTIVE.datasetId = r.dataset_id;
+  ACTIVE.model_id = r.model_id || "";
   const live = (r.status === "running" || r.status === "paused" || r.status === "pending");
   const pct = r.n_rows ? Math.min(100, r.n_done/r.n_rows*100) : 0;
   const elapsed = r.finished_at ? (r.finished_at - r.started_at) : (Date.now()/1000 - r.started_at);
@@ -1324,7 +1327,12 @@ function renderActiveRun(r) {
     <div class="row-list">
       ${rows.length === 0
         ? `<div class="muted small">No rows completed yet…</div>`
-        : rows.map(rr => renderRowCard(rr)).join("")}
+        : rows.map(rr => renderRowCard(rr, {
+            state: ACTIVE,
+            modelId: r.model_id,
+            runId: r.id,
+            datasetId: r.dataset_id,
+          })).join("")}
     </div>` : "";
 
   return summary + detail;
@@ -1332,10 +1340,16 @@ function renderActiveRun(r) {
 
 function renderPromoteToTruth(rr, runId, datasetId) {
   // Image id from image_ref (S3 URLs end with the id). For local-only datasets
-  // (no template) we can't safely identify the row across re-uploads, so disable.
+  // (no template) we can't safely identify the row across re-uploads.
   const ref = rr.image_ref || "";
   const imageId = ref.startsWith("http") ? ref.split("/").pop() : ref;
-  if (!imageId || !datasetId) return "";
+  if (!imageId || !datasetId) {
+    return `<div class="promote-row promote-disabled">
+      <div class="muted small">
+        Promote-to-truth not available: ${!imageId ? "row has no image_id" : "datasetId unknown"}.
+      </div>
+    </div>`;
+  }
   return `
     <div class="promote-row">
       <div class="muted small">

@@ -969,9 +969,31 @@ app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
 
 # ---------- frontend ----------
-@app.get("/")
+def _build_version() -> str:
+    """Use the latest mtime of the served static assets as the cache-bust
+    token. Changes whenever you edit app.js / style.css / index.html, so the
+    browser always pulls a fresh copy without the user touching DevTools.
+    """
+    mtimes = []
+    for name in ("app.js", "style.css", "index.html"):
+        p = FRONTEND_DIR / name
+        try:
+            mtimes.append(int(p.stat().st_mtime))
+        except FileNotFoundError:
+            continue
+    return str(max(mtimes)) if mtimes else "dev"
+
+
+@app.get("/", response_class=PlainTextResponse)
 def index():
-    return FileResponse(FRONTEND_DIR / "index.html")
+    html = (FRONTEND_DIR / "index.html").read_text()
+    html = html.replace("__BUILD__", _build_version())
+    return PlainTextResponse(html, media_type="text/html; charset=utf-8")
+
+
+@app.get("/version")
+def version():
+    return {"build": _build_version()}
 
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")
