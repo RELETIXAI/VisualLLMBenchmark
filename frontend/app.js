@@ -155,7 +155,9 @@ function toggleTheme() {
 })();
 
 // ----- tabs -----
-$$(".tab").forEach(t => t.onclick = () => switchTab(t.dataset.tab));
+// Only wire switchTab on buttons that actually have a data-tab target;
+// Export/Import buttons share the .tab class but have their own onclick handlers.
+$$(".tab[data-tab]").forEach(t => t.onclick = () => switchTab(t.dataset.tab));
 function switchTab(name) {
   $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
   $$(".view").forEach(v => v.classList.toggle("hidden", v.id !== `view-${name}`));
