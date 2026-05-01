@@ -1313,9 +1313,10 @@ const PROVIDER_INFO = {
 
 async function onProviderChange() {
   const prov = $("#r-provider").value;
-  const local = (prov === "ollama" || prov === "lmstudio");
+  const needsBaseUrl = (prov === "ollama" || prov === "lmstudio");
+  const local = needsBaseUrl || prov === "mlx";
   $("#apikey-block").classList.toggle("hidden", local);
-  $("#baseurl-block").classList.toggle("hidden", !local);
+  $("#baseurl-block").classList.toggle("hidden", !needsBaseUrl);
   // Always reset base_url on provider switch so a leftover localhost
   // URL doesn't get sent to a cloud SDK (causes "404 page not found").
   $("#r-baseurl").value = "";
@@ -1343,6 +1344,7 @@ async function onProviderChange() {
 async function fetchModels() {
   const prov = $("#r-provider").value;
   const base = (prov === "ollama" || prov === "lmstudio") ? $("#r-baseurl").value : null;
+  // MLX uses curated registry, no base_url needed
   const sel = $("#r-model-select");
   const cnt = $("#models-count");
   sel.innerHTML = `<option value="">— loading —</option>`;
@@ -1374,7 +1376,7 @@ async function fetchModels() {
 
   let html = `<option value="">— pick a vision-capable model —</option>`;
   if (groups.current.length) {
-    html += `<optgroup label="${prov === 'ollama' || prov === 'lmstudio' ? 'Available locally' : 'Current'}">${groups.current.map(renderOpt).join("")}</optgroup>`;
+    html += `<optgroup label="${prov === 'ollama' || prov === 'lmstudio' || prov === 'mlx' ? 'Available locally' : 'Current'}">${groups.current.map(renderOpt).join("")}</optgroup>`;
   }
   if (groups.legacy.length) {
     html += `<optgroup label="Legacy / older">${groups.legacy.map(renderOpt).join("")}</optgroup>`;
@@ -1428,7 +1430,7 @@ function focusRun(id) {
 
 async function startRun() {
   const provider = $("#r-provider").value;
-  const isLocal = (provider === "ollama" || provider === "lmstudio");
+  const isLocal = (provider === "ollama" || provider === "lmstudio" || provider === "mlx");
   const body = {
     prompt_id:  parseInt($("#r-prompt").value),
     dataset_id: parseInt($("#r-dataset").value),

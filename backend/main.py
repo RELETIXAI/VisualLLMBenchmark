@@ -126,6 +126,11 @@ def models(provider: str, base_url: Optional[str] = None):
     except Exception as e:
         return {"models": [], "details": [], "error": str(e)}
 
+    # MLX: return curated registry (models download on first use)
+    if p == "mlx":
+        details = models_for("mlx")
+        return {"models": [m["id"] for m in details], "details": details}
+
     # Cloud providers: curated vision-capable registry
     if p in ("gemini", "google"):
         p = "gemini"

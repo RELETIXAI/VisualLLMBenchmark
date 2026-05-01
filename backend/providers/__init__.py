@@ -6,6 +6,7 @@ from .anthropic_provider import AnthropicProvider
 from .gemini_provider import GeminiProvider
 from .ollama_provider import OllamaProvider
 from .lmstudio_provider import LMStudioProvider
+from .mlx_provider import MLXProvider
 
 
 def _safe_cloud_base(base_url: str | None) -> str | None:
@@ -32,7 +33,9 @@ def get_provider(name: str, api_key: str | None = None, base_url: str | None = N
         return OllamaProvider(base_url=base_url or "http://localhost:11434")
     if name in ("lmstudio", "lm_studio", "lm-studio"):
         return LMStudioProvider(base_url=base_url or "http://localhost:1234/v1")
+    if name == "mlx":
+        return MLXProvider()
     raise ValueError(f"Unknown provider: {name}")
 
 
-PROVIDERS = ["openai", "anthropic", "gemini", "ollama", "lmstudio"]
+PROVIDERS = ["openai", "anthropic", "gemini", "ollama", "lmstudio", "mlx"]

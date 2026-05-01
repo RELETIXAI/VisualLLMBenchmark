@@ -62,6 +62,39 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
         # Legacy
         {"id": "gemini-2.0-flash",      "label": "Gemini 2.0 Flash",      "input": 0.10, "output":  0.40, "group": "legacy"},
     ],
+
+    # ── MLX (Apple Silicon, free — runs locally via mlx-vlm) ──────────────────
+    # Model IDs are HuggingFace repo paths (mlx-community namespace).
+    # All models below are 4-bit quantised VLMs known to support image input.
+    # Cost is $0 (local compute). Download size noted in label.
+    "mlx": [
+        # Qwen2.5-VL — best overall vision quality for food/nutrition tasks
+        {"id": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",  "label": "Qwen2.5-VL 7B (4-bit, ~4 GB)",  "input": 0, "output": 0, "group": "current",
+         "notes": "Best balance of speed and accuracy; recommended starting point"},
+        {"id": "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",  "label": "Qwen2.5-VL 3B (4-bit, ~2 GB)",  "input": 0, "output": 0, "group": "current",
+         "notes": "Fast, good accuracy on clear food photos"},
+        {"id": "mlx-community/Qwen2.5-VL-32B-Instruct-4bit", "label": "Qwen2.5-VL 32B (4-bit, ~18 GB)", "input": 0, "output": 0, "group": "current",
+         "notes": "Highest local accuracy; needs 24+ GB RAM"},
+        # Llama-3.2-Vision — Meta's vision family
+        {"id": "mlx-community/Llama-3.2-11B-Vision-Instruct-4bit", "label": "Llama 3.2 Vision 11B (4-bit, ~6 GB)", "input": 0, "output": 0, "group": "current",
+         "notes": "Strong vision reasoning; good JSON compliance"},
+        {"id": "mlx-community/Llama-3.2-3B-Vision-Instruct-4bit",  "label": "Llama 3.2 Vision 3B (4-bit, ~2 GB)",  "input": 0, "output": 0, "group": "current",
+         "notes": "Lightweight, fast inference"},
+        # Gemma-3 — Google, vision-capable IT variants
+        {"id": "mlx-community/gemma-3-12b-it-4bit", "label": "Gemma 3 12B IT (4-bit, ~7 GB)",  "input": 0, "output": 0, "group": "current",
+         "notes": "Google model; solid nutrition understanding"},
+        {"id": "mlx-community/gemma-3-4b-it-4bit",  "label": "Gemma 3 4B IT (4-bit, ~2.5 GB)", "input": 0, "output": 0, "group": "current",
+         "notes": "Compact and quick"},
+        # Phi-4 multimodal — Microsoft
+        {"id": "mlx-community/phi-4-multimodal-instruct-4bit", "label": "Phi-4 Multimodal (4-bit, ~8 GB)", "input": 0, "output": 0, "group": "current",
+         "notes": "Microsoft; strong at structured output (JSON)"},
+        # SmolVLM — tiny/speed benchmark
+        {"id": "mlx-community/SmolVLM2-2.2B-Instruct-4bit",  "label": "SmolVLM2 2.2B (4-bit, ~1.5 GB)", "input": 0, "output": 0, "group": "current",
+         "notes": "Fastest; useful as a baseline or for large-scale sweeps"},
+        # Mistral / Pixtral
+        {"id": "mlx-community/Mistral-Small-3.1-24B-Instruct-2503-4bit", "label": "Mistral Small 3.1 24B (4-bit, ~14 GB)", "input": 0, "output": 0, "group": "current",
+         "notes": "Vision + text; needs 16+ GB RAM"},
+    ],
 }
 
 
