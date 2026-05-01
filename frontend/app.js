@@ -44,6 +44,10 @@ const api = {
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({api_key: apiKey||null, base_url: baseUrl||null})
   }).then(r => r.json()),
+  machineId:   ()      => fetch("/api/machine_id").then(r => r.json()),
+  exportBundle:(params) => `/api/export?${new URLSearchParams(params).toString()}`,
+  importPreview: (file) => { const fd = new FormData(); fd.append("file", file); return fetch("/api/import/preview", {method:"POST", body:fd}).then(r => r.json()); },
+  importApply:  (token) => fetch("/api/import/apply", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({import_token: token})}).then(r => r.json()),
 };
 
 const LB = { selected: new Set(), filters: {provider:"", model_id:"", prompt_id:"", dataset_id:"", status:""}, bestOnly: false, runs: [] };
@@ -2231,5 +2235,165 @@ function escape(s) {
     .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
 function fmtNum(n) { return (n||0).toLocaleString(); }
+
+// ─── Export ──────────────────────────────────────────────────────────────────
+
+function openExportModal() {
+  // For now: just trigger download of everything. Future: scope selector.
+  const url = api.exportBundle({include_row_results: true, include_history: true});
+  toast("Generating export bundle…");
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ─── Import ──────────────────────────────────────────────────────────────────
+
+const IMPORT_STATE = { token: null, file: null };
+
+function openImportModal() {
+  IMPORT_STATE.token = null;
+  IMPORT_STATE.file  = null;
+  _imStep("upload");
+  $("#im-apply-btn").classList.add("hidden");
+  $("#im-upload-status").textContent = "";
+  $("#im-machine-label").textContent = "";
+  api.machineId().then(r => {
+    $("#im-machine-label").textContent = `This machine: ${r.machine_id.slice(0,8)}…`;
+  }).catch(() => {});
+  $("#import-modal").classList.remove("hidden");
+}
+
+function closeImportModal() {
+  $("#import-modal").classList.add("hidden");
+}
+
+function _imStep(step) {
+  ["upload","preview","result"].forEach(s => {
+    $("#im-step-"+s).classList.toggle("hidden", s !== step);
+  });
+}
+
+// Wire up file picker + drag-drop once DOM is ready
+document.addEventListener("DOMContentLoaded", () => {
+  const dropZone = $("#im-drop-zone");
+  const fileInput = $("#im-file-input");
+  const browseLink = $("#im-browse");
+
+  if (!dropZone) return;
+
+  browseLink.addEventListener("click", e => { e.preventDefault(); fileInput.click(); });
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) _imHandleFile(fileInput.files[0]);
+  });
+  dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+  dropZone.addEventListener("drop", e => {
+    e.preventDefault();
+    dropZone.classList.remove("drag-over");
+    const f = e.dataTransfer.files[0];
+    if (f) _imHandleFile(f);
+  });
+});
+
+async function _imHandleFile(file) {
+  if (!file.name.endsWith(".zip")) {
+    $("#im-upload-status").textContent = "Please select a .zip bundle file.";
+    return;
+  }
+  IMPORT_STATE.file = file;
+  $("#im-upload-status").textContent = `Analysing ${file.name}…`;
+  try {
+    const plan = await api.importPreview(file);
+    if (plan.error) throw new Error(plan.error);
+    IMPORT_STATE.token = plan.import_token;
+    _imRenderPlan(plan);
+    _imStep("preview");
+    $("#im-apply-btn").classList.remove("hidden");
+  } catch(e) {
+    $("#im-upload-status").textContent = "Error: " + e.message;
+  }
+}
+
+function _imRenderPlan(plan) {
+  const sm = (plan.source_machine_id || "unknown").slice(0,8);
+  const d  = new Date((plan.exported_at || 0) * 1000).toLocaleString();
+
+  const rowOf = (icon, label, val) =>
+    `<tr><td class="ip-icon">${icon}</td><td>${label}</td><td class="ip-val">${val}</td></tr>`;
+
+  const pRows = (plan.prompts.details || []).map(p =>
+    `<div class="ip-detail ${p.status==="new"?"ip-new":"ip-match"}">
+      ${p.status==="new" ? "✓ new" : "◯ match"} — <strong>${escape(p.name)}</strong>
+      ${p.local_id ? `<span class="muted small">→ local #${p.local_id}</span>` : ""}
+    </div>`).join("");
+
+  const dRows = (plan.datasets.details || []).map(d =>
+    `<div class="ip-detail ${d.status==="new"?"ip-new":"ip-match"}">
+      ${d.status==="new" ? "✓ new" : "◯ match"} — <strong>${escape(d.name)}</strong>
+      ${d.local_name && d.local_name!==d.name ? `<span class="muted small">(local name: ${escape(d.local_name)})</span>` : ""}
+      ${d.n_import_corrections ? `<span class="muted small">· ${d.n_import_corrections} correction(s) to merge</span>` : ""}
+    </div>`).join("");
+
+  const byStatus = Object.entries(plan.runs.by_status || {})
+    .map(([s,n]) => `${n} ${s}`).join(", ") || "";
+
+  const warnings = (plan.warnings || []).map(w =>
+    `<div class="ip-warn">⚠ ${escape(w)}</div>`).join("");
+
+  $("#im-plan").innerHTML = `
+    <div class="ip-header">
+      <div>From machine <code>${escape(sm)}…</code></div>
+      <div class="muted small">Exported ${escape(d)}</div>
+    </div>
+    <table class="ip-table">
+      <tbody>
+        ${rowOf(plan.prompts.new?"✓":"◯",  "Prompts",     `<b>${plan.prompts.new}</b> new · ${plan.prompts.matched} already here`)}
+        ${rowOf(plan.datasets.new?"✓":"◯", "Datasets",    `<b>${plan.datasets.new}</b> new · ${plan.datasets.matched} matched by file hash`)}
+        ${rowOf(plan.runs.new?"✓":"◯",     "Runs",        `<b>${plan.runs.new}</b> new · ${plan.runs.already_imported} already imported · ${plan.runs.skipped_orphan||0} skipped${byStatus?" ("+byStatus+")":""}`)}
+        ${rowOf(plan.corrections.new?"✓":"◯","Corrections",`<b>${plan.corrections.new}</b> new · ${plan.corrections.merged} merged into history${plan.corrections.conflicts?" · ⚠ "+plan.corrections.conflicts+" conflict(s)":""}`)}
+      </tbody>
+    </table>
+    ${pRows ? `<div class="ip-details">${pRows}</div>` : ""}
+    ${dRows ? `<div class="ip-details">${dRows}</div>` : ""}
+    ${warnings}
+    <div class="muted small" style="margin-top:12px">Click <strong>Apply import</strong> to merge this data into your local instance. This cannot be undone, but imported runs are tagged and re-importing the same bundle is safe (idempotent).</div>
+  `;
+}
+
+async function applyImport() {
+  if (!IMPORT_STATE.token) return;
+  const btn = $("#im-apply-btn");
+  btn.disabled = true;
+  btn.textContent = "Applying…";
+  try {
+    const result = await api.importApply(IMPORT_STATE.token);
+    if (result.error || result.detail) throw new Error(result.error || result.detail);
+    _imStep("result");
+    btn.classList.add("hidden");
+    $("#im-result").innerHTML = `
+      <div class="ip-success">Import applied successfully.</div>
+      <table class="ip-table" style="margin-top:12px">
+        <tbody>
+          <tr><td>Prompts</td><td class="ip-val">${result.prompts.new} new · ${result.prompts.matched} matched</td></tr>
+          <tr><td>Datasets</td><td class="ip-val">${result.datasets.new} new · ${result.datasets.matched} matched</td></tr>
+          <tr><td>Runs</td><td class="ip-val">${result.runs.new} imported · ${result.runs.skipped} skipped</td></tr>
+          <tr><td>Corrections</td><td class="ip-val">${result.corrections.new} new · ${result.corrections.merged} merged</td></tr>
+        </tbody>
+      </table>
+    `;
+    toast(`Import done — ${result.runs.new} run(s) added`);
+    // Refresh leaderboard and runs list
+    if (typeof reloadLeaderboardTable === "function") reloadLeaderboardTable();
+    if (typeof refreshRuns === "function") refreshRuns();
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = "Apply import";
+    toast("Import failed: " + e.message);
+  }
+}
 
 bootstrap();

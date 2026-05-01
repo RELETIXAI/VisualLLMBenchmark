@@ -1,13 +1,41 @@
 """SQLite store for prompts, datasets, runs, results."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "benchmark.db"
+_MACHINE_ID_FILE = Path(__file__).resolve().parent.parent / "data" / "machine_id.txt"
+
+
+def get_machine_id() -> str:
+    """Stable UUID for this installation, persisted to data/machine_id.txt."""
+    if _MACHINE_ID_FILE.exists():
+        mid = _MACHINE_ID_FILE.read_text().strip()
+        if mid:
+            return mid
+    mid = str(uuid.uuid4())
+    _MACHINE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _MACHINE_ID_FILE.write_text(mid)
+    return mid
+
+
+def hash_file(path: str | Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def hash_prompt(name: str, system_prompt: str) -> str:
+    text = name.strip() + "\n" + system_prompt.strip().replace("\r\n", "\n")
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _conn() -> sqlite3.Connection:
@@ -124,6 +152,47 @@ def init_db() -> None:
                 c.execute("ALTER TABLE row_results ADD COLUMN truth TEXT")
         except Exception:
             pass
+
+        # Migration: prompts.content_hash
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(prompts)").fetchall()]
+            if cols and "content_hash" not in cols:
+                c.execute("ALTER TABLE prompts ADD COLUMN content_hash TEXT")
+                for row in c.execute("SELECT id, name, system_prompt FROM prompts").fetchall():
+                    h = hash_prompt(row["name"], row["system_prompt"])
+                    c.execute("UPDATE prompts SET content_hash=? WHERE id=?", (h, row["id"]))
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_hash ON prompts(content_hash)")
+        except Exception:
+            pass
+
+        # Migration: datasets.file_hash
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(datasets)").fetchall()]
+            if cols and "file_hash" not in cols:
+                c.execute("ALTER TABLE datasets ADD COLUMN file_hash TEXT")
+                for row in c.execute("SELECT id, file_path FROM datasets").fetchall():
+                    try:
+                        h = hash_file(row["file_path"])
+                        c.execute("UPDATE datasets SET file_hash=? WHERE id=?", (h, row["id"]))
+                    except Exception:
+                        pass
+                c.execute("CREATE INDEX IF NOT EXISTS idx_datasets_hash ON datasets(file_hash)")
+        except Exception:
+            pass
+
+        # Migration: runs.source_machine_id + source_run_id (for import tracking)
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(runs)").fetchall()]
+            if cols and "source_machine_id" not in cols:
+                c.execute("ALTER TABLE runs ADD COLUMN source_machine_id TEXT")
+                c.execute("ALTER TABLE runs ADD COLUMN source_run_id INTEGER")
+                c.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_import_source
+                    ON runs(source_machine_id, source_run_id)
+                    WHERE source_machine_id IS NOT NULL
+                """)
+        except Exception:
+            pass
         c.executescript("""
         CREATE TABLE IF NOT EXISTS prompts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,10 +261,11 @@ def list_prompts() -> list[dict]:
 
 
 def create_prompt(name: str, system_prompt: str, description: str | None = None) -> dict:
+    ch = hash_prompt(name, system_prompt)
     with _conn() as c:
         cur = c.execute(
-            "INSERT INTO prompts (name, system_prompt, description, created_at) VALUES (?,?,?,?)",
-            (name, system_prompt, description, time.time()),
+            "INSERT INTO prompts (name, system_prompt, description, created_at, content_hash) VALUES (?,?,?,?,?)",
+            (name, system_prompt, description, time.time(), ch),
         )
         return dict(c.execute("SELECT * FROM prompts WHERE id=?", (cur.lastrowid,)).fetchone())
 
@@ -214,11 +284,15 @@ def delete_prompt(prompt_id: int) -> None:
 # ----- datasets -----
 def create_dataset(name: str, file_path: str, n_rows: int, columns_detected: dict,
                    image_url_template: str | None = None) -> dict:
+    try:
+        fh = hash_file(file_path)
+    except Exception:
+        fh = None
     with _conn() as c:
         cur = c.execute(
-            "INSERT INTO datasets (name, file_path, n_rows, columns_detected, image_url_template, created_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (name, file_path, n_rows, json.dumps(columns_detected), image_url_template, time.time()),
+            "INSERT INTO datasets (name, file_path, n_rows, columns_detected, image_url_template, created_at, file_hash)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (name, file_path, n_rows, json.dumps(columns_detected), image_url_template, time.time(), fh),
         )
         return dict(c.execute("SELECT * FROM datasets WHERE id=?", (cur.lastrowid,)).fetchone())
 
@@ -361,6 +435,28 @@ def find_prompt_by_text(text: str) -> Optional[dict]:
     with _conn() as c:
         r = c.execute("SELECT * FROM prompts WHERE system_prompt=? ORDER BY id DESC LIMIT 1",
                       (text,)).fetchone()
+        return dict(r) if r else None
+
+
+def find_prompt_by_hash(content_hash: str) -> Optional[dict]:
+    with _conn() as c:
+        r = c.execute("SELECT * FROM prompts WHERE content_hash=? LIMIT 1",
+                      (content_hash,)).fetchone()
+        return dict(r) if r else None
+
+
+def find_dataset_by_hash(file_hash: str) -> Optional[dict]:
+    with _conn() as c:
+        r = c.execute("SELECT * FROM datasets WHERE file_hash=? LIMIT 1",
+                      (file_hash,)).fetchone()
+        return dict(r) if r else None
+
+
+def find_imported_run(source_machine_id: str, source_run_id: int) -> Optional[dict]:
+    with _conn() as c:
+        r = c.execute(
+            "SELECT * FROM runs WHERE source_machine_id=? AND source_run_id=?",
+            (source_machine_id, source_run_id)).fetchone()
         return dict(r) if r else None
 
 

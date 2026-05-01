@@ -1156,6 +1156,99 @@ def post_v1_run(r: V1RunIn):
     }
 
 
+# ---------- export / import ----------
+
+@app.get("/api/machine_id")
+def machine_id_endpoint():
+    return {"machine_id": db.get_machine_id()}
+
+
+@app.get("/api/export")
+def export_bundle(
+    run_ids:              Optional[str] = None,
+    prompt_ids:           Optional[str] = None,
+    dataset_ids:          Optional[str] = None,
+    include_row_results:  bool = True,
+    include_history:      bool = True,
+):
+    """Download a zip bundle of selected data for cross-machine transfer."""
+    from . import io_pack
+    from fastapi.responses import Response as _Resp
+
+    def _ids(s):
+        return [int(x) for x in s.split(",") if x.strip()] if s else None
+
+    try:
+        zip_path = io_pack.pack_export(
+            prompt_ids=_ids(prompt_ids),
+            dataset_ids=_ids(dataset_ids),
+            run_ids=_ids(run_ids),
+            include_row_results=include_row_results,
+            include_history=include_history,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Export failed: {e}")
+
+    content = zip_path.read_bytes()
+    shutil.rmtree(zip_path.parent, ignore_errors=True)
+    return _Resp(
+        content=content,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_path.name}"'},
+    )
+
+
+class ImportApplyIn(BaseModel):
+    import_token: str
+
+
+@app.post("/api/import/preview")
+async def import_preview(file: UploadFile = File(...)):
+    """Upload a bundle zip and get a merge preview. Returns an import_token."""
+    from . import io_pack
+    import uuid as _uuid
+
+    token   = _uuid.uuid4().hex
+    tmp_dir = ROOT / "data" / "_tmp_imports"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f"{token}.zip"
+
+    with open(tmp_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        plan = io_pack.inspect_import(tmp_path)
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(400, f"Could not read bundle: {e}")
+
+    if plan.get("error"):
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(400, plan["error"])
+
+    plan["import_token"] = token
+    return plan
+
+
+@app.post("/api/import/apply")
+def import_apply(body: ImportApplyIn):
+    """Execute the import merge for a previously previewed bundle."""
+    from . import io_pack
+
+    tmp_path = ROOT / "data" / "_tmp_imports" / f"{body.import_token}.zip"
+    if not tmp_path.exists():
+        raise HTTPException(404, "Import token not found or expired — please re-upload the bundle.")
+
+    try:
+        result = io_pack.apply_import(tmp_path)
+    except Exception as e:
+        raise HTTPException(500, f"Import failed: {e}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    return result
+
+
 # ---------- static images ----------
 app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
