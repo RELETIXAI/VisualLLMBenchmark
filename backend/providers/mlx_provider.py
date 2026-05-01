@@ -9,16 +9,46 @@ Supported: Apple Silicon Macs (M1 / M2 / M3 / M4)
 """
 from __future__ import annotations
 
-import tempfile
+import json
 import os
+import tempfile
 import threading
-from typing import Any
 
 from .base import BaseProvider, ProviderResult, parse_json_loose, normalize_prediction, DEFAULT_USER_PROMPT
 
 # ── model cache (model_id → (model, processor, config)) ────────────────────────
 _CACHE: dict[str, tuple] = {}
 _CACHE_LOCK = threading.Lock()
+
+# Text-only model_type values that mlx_vlm cannot run with images
+_TEXT_ONLY_TYPES = {
+    "gemma3_text", "gemma2", "llama", "mistral", "qwen2", "phi3",
+    "phi2", "gpt2", "gpt_neox", "falcon", "mpt", "bloom",
+}
+
+
+def _check_vision_capable(model_path: str) -> None:
+    """Raise ValueError immediately if the model is text-only."""
+    cfg_path = os.path.join(model_path, "config.json")
+    if not os.path.exists(cfg_path):
+        return  # can't tell — let mlx_vlm decide
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except Exception:
+        return
+    model_type = cfg.get("model_type", "")
+    is_vision = any(k in cfg for k in (
+        "vision_config", "image_token_index", "vision_model_type",
+        "pixel_shuffle_factor", "visual",
+    )) or any(a for a in (cfg.get("architectures") or [])
+              if "VisionLanguage" in a or "VLM" in a or "Vision" in a)
+    if not is_vision and model_type in _TEXT_ONLY_TYPES:
+        raise ValueError(
+            f"Model '{os.path.basename(model_path)}' is text-only (type: {model_type}) "
+            f"and cannot process images. Download a vision-capable model such as "
+            f"mlx-community/Qwen2.5-VL-7B-Instruct-4bit from LM Studio or HuggingFace."
+        )
 
 
 def _load_model(model_id: str) -> tuple:
@@ -51,6 +81,10 @@ class MLXProvider(BaseProvider):
                     "mlx-vlm is not installed. Run: pip install mlx-vlm"
                 )
 
+            # Fail fast if model is text-only — avoids burning through 50 rows
+            if os.path.isdir(model_id):
+                _check_vision_capable(model_id)
+
             # Resolve image to a local path (mlx_vlm needs a file path or PIL image)
             tmp_path: str | None = None
             img_arg: str | None = None
@@ -80,7 +114,7 @@ class MLXProvider(BaseProvider):
                     num_images=1 if img_arg else 0,
                 )
 
-                # Count approximate input tokens (processor may expose tokenizer)
+                # Count approximate input tokens
                 try:
                     tok = processor.tokenizer if hasattr(processor, "tokenizer") else processor
                     in_tokens = len(tok.encode(system_prompt + user_prompt))
@@ -95,10 +129,8 @@ class MLXProvider(BaseProvider):
                     verbose=False,
                 )
 
-                # output may be a string or an object with .text
                 text = output if isinstance(output, str) else getattr(output, "text", str(output))
 
-                # Estimate output tokens
                 try:
                     tok = processor.tokenizer if hasattr(processor, "tokenizer") else processor
                     out_tokens = len(tok.encode(text))

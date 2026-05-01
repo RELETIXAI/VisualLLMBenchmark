@@ -1450,6 +1450,15 @@ async function startRun() {
   if (!body.prompt_id || !body.dataset_id || !body.model_id) {
     return toast("Fill all required fields.");
   }
+  // Guard: block text-only MLX models before wasting a run
+  if (provider === "mlx") {
+    const sel = $("#r-model-select");
+    const selectedOpt = sel.options[sel.selectedIndex];
+    const notes = selectedOpt ? selectedOpt.title : "";
+    if (notes.includes("text-only")) {
+      return toast("⚠ This model has no image input (text-only). Download a vision model like Qwen2.5-VL first.", "error");
+    }
+  }
   const r = await api.startRun(body);
   if (!r.run_id) return toast("Failed to start.");
   toast(`Run #${r.run_id} started.`);
