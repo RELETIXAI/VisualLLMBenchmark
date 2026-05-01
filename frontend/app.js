@@ -170,8 +170,10 @@ function switchTab(name) {
 function toast(msg, kind="ok") {
   const t = $("#toast");
   t.textContent = msg;
+  t.className = kind === "error" ? "toast-error" : "";
   t.classList.remove("hidden");
-  setTimeout(() => t.classList.add("hidden"), 2600);
+  const delay = kind === "error" ? 5000 : 2600;
+  setTimeout(() => t.classList.add("hidden"), delay);
 }
 
 // ----- bootstrap -----
@@ -2238,16 +2240,32 @@ function fmtNum(n) { return (n||0).toLocaleString(); }
 
 // ─── Export ──────────────────────────────────────────────────────────────────
 
-function openExportModal() {
-  // For now: just trigger download of everything. Future: scope selector.
-  const url = api.exportBundle({include_row_results: true, include_history: true});
+async function openExportModal() {
+  // Verify the server is reachable before triggering the download
   toast("Generating export bundle…");
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  try {
+    const probe = await fetch("/api/export?include_row_results=true&include_history=true");
+    if (!probe.ok) {
+      const txt = await probe.text().catch(() => probe.statusText);
+      toast("Export failed: " + txt, "error");
+      return;
+    }
+    const blob = await probe.blob();
+    const cd   = probe.headers.get("Content-Disposition") || "";
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const fname = match ? match[1] : "benchmark-export.zip";
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    toast("Export downloaded ✓");
+  } catch (e) {
+    toast("Export failed — is the server running? (" + e.message + ")", "error");
+  }
 }
 
 // ─── Import ──────────────────────────────────────────────────────────────────

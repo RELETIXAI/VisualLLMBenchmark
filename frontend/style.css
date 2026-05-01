@@ -391,6 +391,7 @@ tbody tr:hover { background: var(--paper); }
   z-index: 100;
 }
 @keyframes pop { from { opacity: 0; transform: translateY(8px);} to { opacity: 1; transform: none;} }
+.toast-error { background: #c0392b !important; color: #fff !important; }
 
 .thumb {
   width: 48px; height: 48px; object-fit: cover;
