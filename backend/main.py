@@ -126,10 +126,62 @@ def models(provider: str, base_url: Optional[str] = None):
     except Exception as e:
         return {"models": [], "details": [], "error": str(e)}
 
-    # MLX: return curated registry (models download on first use)
+    # MLX: scan local disk for actually-installed models
     if p == "mlx":
-        details = models_for("mlx")
-        return {"models": [m["id"] for m in details], "details": details}
+        import glob as _glob, json as _json, os as _os
+        search_roots = [
+            _os.path.expanduser("~/AI/models/mlx"),
+            _os.path.expanduser("~/.cache/huggingface/hub"),
+            _os.path.expanduser("~/.lmstudio/models"),
+        ]
+        found = []
+        seen = set()
+        for root in search_roots:
+            for cfg in _glob.glob(f"{root}/**/config.json", recursive=True):
+                try:
+                    with open(cfg) as f:
+                        data = _json.load(f)
+                except Exception:
+                    continue
+                model_dir = _os.path.dirname(cfg)
+                # Must have safetensors or mlx weights (not just a cache stub)
+                has_weights = any(
+                    _os.path.exists(_os.path.join(model_dir, w))
+                    for w in ("model.safetensors", "model.safetensors.index.json",
+                              "weights.npz", "model-00001-of.safetensors")
+                ) or _glob.glob(_os.path.join(model_dir, "*.safetensors"))
+                if not has_weights:
+                    continue
+                # Check vision capability
+                is_vision = any(k in data for k in (
+                    "vision_config", "image_token_index", "vision_model_type",
+                    "pixel_shuffle_factor", "visual",
+                )) or any(a for a in (data.get("architectures") or [])
+                          if "VisionLanguage" in a or "VLM" in a or "Vision" in a)
+                model_type = data.get("model_type", "")
+                # Use directory name as model label
+                label = _os.path.basename(model_dir)
+                size_bytes = sum(
+                    _os.path.getsize(fp)
+                    for fp in _glob.glob(_os.path.join(model_dir, "*.safetensors"))
+                    if _os.path.isfile(fp)
+                )
+                size_str = f"~{size_bytes/1e9:.1f} GB" if size_bytes > 1e8 else ""
+                model_id = model_dir  # local path is the "id" for mlx_vlm
+                if model_id in seen:
+                    continue
+                seen.add(model_id)
+                found.append({
+                    "id": model_id,
+                    "label": f"{label} {size_str}".strip(),
+                    "input": 0, "output": 0,
+                    "group": "current",
+                    "notes": f"{'vision ✓' if is_vision else 'text-only ✗ (no image input)'} · {model_type}",
+                })
+        if not found:
+            return {"models": [], "details": [],
+                    "error": "No local MLX models found. Download from mlx-community on HuggingFace or LM Studio."}
+        return {"models": [m["id"] for m in found], "details": found}
 
     # Cloud providers: curated vision-capable registry
     if p in ("gemini", "google"):
