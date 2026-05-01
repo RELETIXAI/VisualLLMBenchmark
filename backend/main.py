@@ -144,12 +144,18 @@ def models(provider: str, base_url: Optional[str] = None):
                 except Exception:
                     continue
                 model_dir = _os.path.dirname(cfg)
-                # Must have safetensors or mlx weights (not just a cache stub)
+                # Resolve symlinks so duplicates (e.g. LM Studio symlinks) are deduped
+                real_dir = _os.path.realpath(model_dir)
+                if real_dir in seen:
+                    continue
+                seen.add(real_dir)
+                model_dir = real_dir  # always use the canonical path
+                # Must have safetensors weights (not just a cache stub)
                 has_weights = any(
                     _os.path.exists(_os.path.join(model_dir, w))
                     for w in ("model.safetensors", "model.safetensors.index.json",
-                              "weights.npz", "model-00001-of.safetensors")
-                ) or _glob.glob(_os.path.join(model_dir, "*.safetensors"))
+                              "weights.npz")
+                ) or bool(_glob.glob(_os.path.join(model_dir, "*.safetensors")))
                 if not has_weights:
                     continue
                 # Check vision capability
@@ -159,7 +165,6 @@ def models(provider: str, base_url: Optional[str] = None):
                 )) or any(a for a in (data.get("architectures") or [])
                           if "VisionLanguage" in a or "VLM" in a or "Vision" in a)
                 model_type = data.get("model_type", "")
-                # Use directory name as model label
                 label = _os.path.basename(model_dir)
                 size_bytes = sum(
                     _os.path.getsize(fp)
@@ -167,10 +172,7 @@ def models(provider: str, base_url: Optional[str] = None):
                     if _os.path.isfile(fp)
                 )
                 size_str = f"~{size_bytes/1e9:.1f} GB" if size_bytes > 1e8 else ""
-                model_id = model_dir  # local path is the "id" for mlx_vlm
-                if model_id in seen:
-                    continue
-                seen.add(model_id)
+                model_id = model_dir
                 found.append({
                     "id": model_id,
                     "label": f"{label} {size_str}".strip(),
