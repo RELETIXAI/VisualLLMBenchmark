@@ -88,6 +88,9 @@
             <input type="checkbox" id="lb-best-only" style="width:auto" /> best per (provider, model)
           </label>
           <button class="btn-ghost" onclick="refreshLeaderboard()">Refresh</button>
+          <button id="lb-rescore-btn" class="btn-ghost hidden"
+                  title="Re-score every completed run in the active filter against current truth + scoring rules"
+                  onclick="rescoreFiltered()">↻ Re-score all</button>
         </div>
       </div>
     </div>

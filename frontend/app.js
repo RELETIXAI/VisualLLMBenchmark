@@ -264,6 +264,17 @@ async function reloadLeaderboardTable() {
   for (const k of ["provider","model_id","prompt_id","dataset_id","status"]) {
     if (LB.filters[k]) q[k] = LB.filters[k];
   }
+  // Show the Re-score button only when a single dataset is selected.
+  const rescoreBtn = $("#lb-rescore-btn");
+  if (rescoreBtn) {
+    if (LB.filters.dataset_id) {
+      const ds = (CACHE.datasets||[]).find(d => String(d.id) === String(LB.filters.dataset_id));
+      rescoreBtn.classList.remove("hidden");
+      rescoreBtn.textContent = `↻ Re-score "${ds ? ds.name : `dataset ${LB.filters.dataset_id}`}"`;
+    } else {
+      rescoreBtn.classList.add("hidden");
+    }
+  }
   let runs = await api.filteredRuns(q);
   // Default sort by composite score desc, then accuracy desc
   runs.sort((a,b) => (b.composite_score||0) - (a.composite_score||0) || (b.accuracy||0) - (a.accuracy||0));
@@ -1965,6 +1976,21 @@ async function rescoreRun(runId) {
   if (LB && typeof reloadLeaderboardTable === "function") reloadLeaderboardTable();
   if (REVIEW.runId === runId) loadRunDrawer(runId);
   return r;
+}
+
+async function rescoreFiltered() {
+  if (!LB.filters.dataset_id) {
+    toast("Pick a dataset first to re-score its runs.");
+    return;
+  }
+  const ds = (CACHE.datasets||[]).find(d => String(d.id) === String(LB.filters.dataset_id));
+  const yes = confirm(
+    `Re-score every completed run for dataset "${ds ? ds.name : LB.filters.dataset_id}"?\n\n` +
+    `This replays scoring against the current truth + scoring rules. ` +
+    `Run results stay; only the per-row scores and run-level accuracy/composite are updated.`
+  );
+  if (!yes) return;
+  await rescoreAllForDataset(LB.filters.dataset_id);
 }
 
 async function rescoreAllForDataset(datasetId) {
