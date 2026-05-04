@@ -13,6 +13,7 @@ Composite leaderboard score then folds in latency + cost.
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -251,6 +252,18 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None) -> dict:
     ing_f1 = ing["f1"]
     weight_acc = ing["weight_acc"]
 
+    # Patch 1 — empty-list floor:
+    # When the model returns no ingredients but the dish name matches well
+    # enough (name_sim >= 0.5) AND the truth has only 1–2 ingredients (likely
+    # implicit in the food name like "oatmeal with milk"), award soft credit
+    # so we don't double-penalise a correctly-named dish for under-enumeration.
+    truth_ings = truth_row.get("ingredients_truth") or []
+    pred_ings  = pred.get("ingredients") or []
+    implicit_floor = None
+    if truth_ings and not pred_ings and len(truth_ings) <= 2 and name_sim >= 0.5:
+        implicit_floor = min(name_sim * 0.6, 0.6)
+        ing_f1 = max(ing_f1, implicit_floor)
+
     # Health grade
     health = health_score(pred.get("health_score"), truth_row.get("health_score_truth"))
 
@@ -262,7 +275,12 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None) -> dict:
         parts.append(("macros", macros_avg, w["macros"]))
     if truth_row.get("ingredients_truth"):
         parts.append(("ingredient_f1", ing_f1, w["ingredient_f1"]))
-        parts.append(("weight_acc", weight_acc, w["weight_acc"]))
+        # Patch 2 — decouple weight_acc from f1:
+        # Only fold weight_acc into overall when there is at least one matched
+        # ingredient. With zero matches, weight_acc=0 was double-counting the
+        # same failure already captured by f1=0.
+        if ing.get("matched", 0) > 0:
+            parts.append(("weight_acc", weight_acc, w["weight_acc"]))
     if health["score"] is not None and truth_row.get("health_score_truth"):
         parts.append(("health", health["score"], w["health"]))
 
@@ -284,6 +302,7 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None) -> dict:
         "ingredients": ing,
         "ingredient_f1": ing_f1,
         "weight_acc": weight_acc,
+        "implicit_floor": implicit_floor,    # non-null when Patch 1 kicked in
         "health": health,
         "overall": overall,
         "weights_used": {k: v for k, _, v in [(p[0], p[1], p[2]) for p in parts]},
@@ -293,6 +312,10 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None) -> dict:
 def composite_score(accuracy: float, avg_latency_ms: float, total_cost_usd: float,
                     weights: dict | None = None) -> float:
     w = weights or {"accuracy": 0.70, "speed": 0.15, "cost": 0.15}
-    speed = max(0.0, 1.0 - min(avg_latency_ms, 30000) / 30000)
+    # Patch 3 — softer latency curve via exponential decay:
+    #   1.0 at 0s · ~85% at 10s · ~61% at 30s · ~37% at 60s · ~5% at 180s
+    # The previous linear cap at 30s gave local Ollama runs (typically 60–200s)
+    # zero speed credit, distorting comparisons against cloud providers.
+    speed = math.exp(-max(0.0, avg_latency_ms) / 60000.0)
     cost = max(0.0, 1.0 - min(total_cost_usd, 1.0) / 1.0)
     return 100.0 * (w["accuracy"] * accuracy + w["speed"] * speed + w["cost"] * cost)
