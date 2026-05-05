@@ -58,6 +58,11 @@ _STOP = {
     "blended", "whipped", "toasted", "mashed", "crushed",
     "chopped", "sliced", "grated", "ground", "shredded",
     "peeled", "seeded", "deboned", "minced",
+    # Flavour-prep descriptors — describe HOW it was seasoned, not WHAT it is.
+    # Macro impact (a teaspoon of spice) is captured by the dish-level macros;
+    # ingredient identity should not be penalised for "shawarma-spiced" vs
+    # "seasoned" or "marinated chicken" vs "chicken".
+    "spiced", "seasoned", "marinated", "herbed", "flavoured", "flavored",
 }
 # DELIBERATELY NOT in _STOP — identity-bearing modifiers that change the
 # product itself (different macros, different SKU). Keeping these AND
