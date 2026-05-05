@@ -53,7 +53,8 @@ _STOP = {
     # Pure preparation methods — describe HOW the ingredient was prepared,
     # not WHAT it is. Calorie/macro impact is captured at the dish-macros
     # level; ingredient F1 should not double-penalise prep-only differences.
-    "raw", "cooked", "fresh", "dried",
+    "raw", "cooked", "fresh", "dried", "frozen", "processed",
+    "homemade", "instant", "natural",
     "scrambled", "boiled", "fried", "baked", "grilled", "steamed",
     "blended", "whipped", "toasted", "mashed", "crushed",
     "chopped", "sliced", "grated", "ground", "shredded",
@@ -80,6 +81,27 @@ _IDENTITY_MODS = {
     "dark", "light", "smoked",
     # state of ripeness / origin specifier
     "ripe", "unripe", "organic",
+}
+
+# When the only shared token between two short ingredient names is a
+# "category word" (a container, form, or vehicle rather than a food), the
+# match is almost always coincidental: the contents differ even when the
+# form is identical — strawberry juice ≠ watermelon juice; olive oil ≠
+# vegetable oil; apple pie ≠ cherry pie. The short-name false-pair guard
+# below only fires when the shared token is in this set, so genuine food
+# kinds (chicken, beef, lettuce, rice, pasta) don't get rejected when only
+# the cut/sub-type differs.
+_GENERIC_CATEGORY_TOKENS = {
+    # liquid derivatives
+    "juice", "oil", "sauce", "syrup", "dressing",
+    "soup", "stew", "broth", "stock",
+    # beverages
+    "wine", "beer", "tea", "coffee", "drink", "beverage",
+    # baked / sweet forms
+    "pie", "cake", "bread", "bun", "roll", "biscuit", "cookie",
+    "muffin", "tart", "pastry", "pancake", "waffle",
+    # processed forms
+    "paste", "powder", "marinade", "spread",
 }
 
 
@@ -118,15 +140,21 @@ def _sim_pair(a: set[str], b: set[str]) -> float:
     b_id = b & _IDENTITY_MODS
     if a_id and b_id and not (a_id & b_id):
         return 0.0
-    # Short-name coincidence guard: trigger ONLY when both sides have
-    # ≤2 tokens, share exactly 1, AND have non-shared tokens on BOTH sides.
-    # That last condition is what distinguishes a real disagreement
-    # ("strawberry juice" vs "watermelon juice" — qualifier conflict) from
-    # a containment case ("zucchini" vs "zucchini" after stop-removal, or
-    # "milk" vs "milk, full-fat" — one side is just less specific). The
-    # subset cases fall through to F1.
+    # Short-name coincidence guard. Triggers only when ALL of these hold:
+    #   1. Both sides ≤2 tokens.
+    #   2. Share exactly 1 token (real disagreement, not containment).
+    #   3. Neither set is a subset of the other.
+    #   4. The single shared token is a generic CATEGORY word
+    #      (juice / oil / pie / sauce / …) rather than a substantive
+    #      food kind (chicken / lettuce / rice / pasta).
+    # This rejects "strawberry juice" vs "watermelon juice" (share
+    # {juice}) and "olive oil" vs "vegetable oil" (share {oil}) while
+    # letting "chicken breast" vs "chicken whole" through at honest F1
+    # — same chicken, different cut.
+    shared = a & b
     if (len(a) <= 2 and len(b) <= 2 and inter < 2
-            and not (a <= b or b <= a)):
+            and not (a <= b or b <= a)
+            and (shared & _GENERIC_CATEGORY_TOKENS)):
         return 0.0
     # Plain F1 — no subset/containment bonus.
     # Earlier code returned 1.0 whenever a ⊆ b, but that gave full credit
