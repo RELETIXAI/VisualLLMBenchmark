@@ -47,7 +47,48 @@ INGREDIENT_MATCH_THRESHOLD = 0.40   # name similarity required to count as a mat
 
 
 # ----------- text similarity -----------
-_STOP = {"the", "a", "an", "of", "with", "and", "or", "in", "to", "raw"}
+# Pure connectives (no food identity)
+_STOP = {
+    "the", "a", "an", "of", "with", "and", "or", "in", "to",
+    # Pure preparation methods — describe HOW the ingredient was prepared,
+    # not WHAT it is. Calorie/macro impact is captured at the dish-macros
+    # level; ingredient F1 should not double-penalise prep-only differences.
+    "raw", "cooked", "fresh", "dried",
+    "scrambled", "boiled", "fried", "baked", "grilled", "steamed",
+    "blended", "whipped", "toasted", "mashed", "crushed",
+    "chopped", "sliced", "grated", "ground", "shredded",
+    "peeled", "seeded", "deboned", "minced",
+}
+# DELIBERATELY NOT in _STOP — identity-bearing modifiers that change the
+# product itself (different macros, different SKU). Keeping these AND
+# enforcing a "no conflicting identity" rule below makes
+# "milk, full-fat" vs "milk, skim" stay correctly unmatched.
+_IDENTITY_MODS = {
+    # fat/dairy variants
+    "whole", "full", "skim", "fat", "low", "reduced",
+    # grain refinement
+    "brown", "white", "refined", "wholegrain", "wholewheat",
+    # sweetness / salt
+    "sweetened", "unsweetened", "salted", "unsalted",
+    "sweet", "savoury", "savory",
+    # darkness / strength
+    "dark", "light", "smoked",
+    # state of ripeness / origin specifier
+    "ripe", "unripe", "organic",
+}
+
+
+_PAREN_RE = re.compile(r"\(([^)]*)\)")
+
+
+def _split_paren(s: str) -> tuple[str, str]:
+    """Return (outer, inner) where outer = original with (...) stripped,
+    inner = content concatenated. Either may be empty."""
+    if not s:
+        return "", ""
+    inner_parts = _PAREN_RE.findall(s)
+    outer = _PAREN_RE.sub(" ", s)
+    return outer, " ".join(inner_parts)
 
 
 def _tokens(s: str) -> set[str]:
@@ -58,20 +99,60 @@ def _tokens(s: str) -> set[str]:
     return toks - _STOP if len(toks) > 1 else toks
 
 
-def text_similarity(pred: str | None, truth: str | None) -> float:
-    """Containment-aware F1 — gives full credit when one name is a clean
-    subset of the other (e.g. "dates" inside "dates (deglet nour)")."""
-    if not pred or not truth:
-        return 0.0
-    a, b = _tokens(pred), _tokens(truth)
+def _sim_pair(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
     inter = len(a & b)
     if inter == 0:
         return 0.0
-    f1 = (2.0 * inter) / (len(a) + len(b))
-    overlap = inter / min(len(a), len(b))   # 1.0 when one is subset of other
-    return max(f1, overlap)
+    # Identity-conflict guard: when both sides explicitly use a product-variant
+    # modifier (full-fat/skim/whole, brown/white, sweetened/unsweetened, etc.)
+    # and the modifiers don't overlap, this is a real different-SKU mismatch
+    # — bail out at 0.0 so e.g. "milk, full-fat" ≠ "milk, skim".
+    a_id = a & _IDENTITY_MODS
+    b_id = b & _IDENTITY_MODS
+    if a_id and b_id and not (a_id & b_id):
+        return 0.0
+    # True-subset bonus — give full credit when one bag of tokens is wholly
+    # inside the other (e.g. {dates} ⊆ {dates, deglet, nour}).
+    if a <= b or b <= a:
+        return 1.0
+    # Short-name coincidence guard: when both sides reduce to ≤2 tokens and
+    # share only 1, that 1 is likely a generic head noun ("juice", "oil",
+    # "bun") rather than evidence of the same product. Reject — F1 of 0.50
+    # in these cases falsely paired e.g. "strawberry juice" with "watermelon
+    # juice" or "olive oil" with "vegetable oil".
+    if len(a) <= 2 and len(b) <= 2 and inter < 2:
+        return 0.0
+    return (2.0 * inter) / (len(a) + len(b))
+
+
+def text_similarity(pred: str | None, truth: str | None) -> float:
+    """Containment-aware F1 — gives full credit when one name is a clean
+    subset of the other (e.g. "dates" inside "dates (deglet nour)").
+
+    Parentheticals (often regional/native variant names like "(gibna beida)"
+    or "(zabadi)") are scored both as part of the outer name and as a
+    standalone alternative; we take the best pairing across all four
+    combinations.
+    """
+    if not pred or not truth:
+        return 0.0
+    p_outer, p_inner = _split_paren(pred)
+    t_outer, t_inner = _split_paren(truth)
+    sets = {
+        "p_outer": _tokens(p_outer),
+        "p_inner": _tokens(p_inner),
+        "t_outer": _tokens(t_outer),
+        "t_inner": _tokens(t_inner),
+    }
+    best = 0.0
+    for pk in ("p_outer", "p_inner"):
+        for tk in ("t_outer", "t_inner"):
+            s = _sim_pair(sets[pk], sets[tk])
+            if s > best:
+                best = s
+    return best
 
 
 # ----------- nutrient scoring -----------
