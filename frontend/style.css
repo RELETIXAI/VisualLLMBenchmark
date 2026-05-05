@@ -747,6 +747,22 @@ optgroup { font-style: normal; font-weight: 600; color: var(--muted); }
   display: flex; align-items: center; gap: 8px;
 }
 .cmp-detail-label .pill { font-size: 10.5px; }
+.cmp-err-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: rgba(160,74,60,0.10);
+  color: var(--red);
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease);
+  white-space: nowrap;
+}
+.cmp-err-pill:hover {
+  background: rgba(160,74,60,0.20);
+  color: #6f2f25;
+}
+[data-theme="dark"] .cmp-err-pill:hover { color: #ffb6a8; }
 
 /* Live runs strip */
 #live-runs > .card {

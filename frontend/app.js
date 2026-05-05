@@ -469,6 +469,7 @@ async function openCompareView() {
   CMP.expandedSwings = new Set();
   CMP.cardState = { expandedRows: new Set(), rawExpanded: new Set() };
   CMP.filter = "";
+  CMP.hideErrors = false;
   CMP.payload = null;
   const box = $("#compare-view");
   box.innerHTML = `<div class="card"><p class="muted">Loading comparison for runs ${ids.join(", ")}…</p></div>`;
@@ -587,23 +588,43 @@ function renderCompare(d) {
   const allShared = d.shared_rows || [];
   CMP.payload = d;
   const filt = (CMP.filter || "").toLowerCase().trim();
-  const visibleShared = !filt ? allShared : allShared.filter(s => {
-    const truth = (s.truth_food || "").toLowerCase();
-    if (truth.includes(filt)) return true;
-    if (String(s.row_idx).includes(filt)) return true;
-    for (const r of runs) {
-      const bd = s.by_run[String(r.id)] || {};
-      if ((bd.pred_food || "").toLowerCase().includes(filt)) return true;
-    }
-    return false;
-  });
+  const hideErrors = !!CMP.hideErrors;
+  // Count errored rows for the toggle label
+  const erroredCount = allShared.filter(s =>
+    runs.some(r => (s.by_run[String(r.id)] || {}).error)
+  ).length;
+  let visibleShared = allShared;
+  if (hideErrors) {
+    visibleShared = visibleShared.filter(s =>
+      !runs.some(r => (s.by_run[String(r.id)] || {}).error)
+    );
+  }
+  if (filt) {
+    visibleShared = visibleShared.filter(s => {
+      const truth = (s.truth_food || "").toLowerCase();
+      if (truth.includes(filt)) return true;
+      if (String(s.row_idx).includes(filt)) return true;
+      for (const r of runs) {
+        const bd = s.by_run[String(r.id)] || {};
+        if ((bd.pred_food || "").toLowerCase().includes(filt)) return true;
+      }
+      return false;
+    });
+  }
 
   const sharedTable = !allShared.length ? `<p class="muted">No shared rows between selected runs.</p>` : `
-    <div class="row-between" style="align-items:center;margin:14px 0 8px">
+    <div class="row-between" style="align-items:center;margin:14px 0 8px;flex-wrap:wrap;gap:10px">
       <h4 style="margin:0">All shared rows · ${visibleShared.length} of ${allShared.length} (sorted by score spread)</h4>
-      <input type="search" id="cmp-filter" value="${escape(CMP.filter)}"
-             placeholder="filter by row idx, truth, or model output…"
-             oninput="onCompareFilter(event)" style="width:280px" />
+      <div style="display:flex;align-items:center;gap:14px">
+        ${erroredCount ? `<label class="small muted" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="cmp-hide-err" ${hideErrors?'checked':''}
+                 onchange="onCompareHideErrors(event)" style="width:auto" />
+          Hide rows with errors (${erroredCount})
+        </label>` : ""}
+        <input type="search" id="cmp-filter" value="${escape(CMP.filter)}"
+               placeholder="filter by row idx, truth, or model output…"
+               oninput="onCompareFilter(event)" style="width:260px" />
+      </div>
     </div>
     <table class="cmp-table cmp-rows">
       <thead><tr>
@@ -624,8 +645,17 @@ function renderCompare(d) {
             const bd = s.by_run[String(r.id)] || {};
             const ov = (bd.scores||{}).overall || 0;
             const c = ov>=0.85?"var(--green)":ov>=0.5?"var(--copper)":"var(--red)";
-            const pred = bd.error ? `<span style="color:var(--red)">ERROR</span>` : escape(bd.pred_food||"—");
-            return `<td class="small"><span class="num" style="color:${c};font-weight:600">${(ov*100).toFixed(0)}%</span> · ${pred}</td>`;
+            let cell;
+            if (bd.error) {
+              const errMsg = String(bd.error || "").replace(/"/g, '&quot;').slice(0, 200);
+              cell = `<span class="cmp-err-pill" title="${errMsg}"
+                            onclick="retryCompareCell(${r.id}, ${s.row_idx}, this)">
+                        ERROR · ↺ retry
+                      </span>`;
+            } else {
+              cell = escape(bd.pred_food || "—");
+            }
+            return `<td class="small"><span class="num" style="color:${c};font-weight:600">${(ov*100).toFixed(0)}%</span> · ${cell}</td>`;
           }).join("")}
         </tr>`;
         // Detail row (rendered as a single colspan cell that holds the per-run cards)
@@ -662,6 +692,36 @@ function renderCompare(d) {
       ${nutTable}
       ${sharedTable}
     </div>`;
+}
+
+function onCompareHideErrors(e) {
+  CMP.hideErrors = !!e.target.checked;
+  if (CMP.payload) $("#compare-view").innerHTML = renderCompare(CMP.payload);
+}
+
+async function retryCompareCell(runId, rowIdx, btnEl) {
+  if (btnEl) { btnEl.textContent = "↺ retrying…"; btnEl.style.pointerEvents = "none"; }
+  try {
+    const result = await api.retryRow(runId, rowIdx, null, null);
+    if (result && result.detail) throw new Error(result.detail);
+
+    // Invalidate caches so the next compare-render sees fresh data
+    delete CMP.fullRuns[runId];
+
+    // Re-fetch the comparison payload so spreads / scores update
+    const ids = (CMP.payload?.runs || []).map(r => r.id);
+    const fresh = await api.compare(ids);
+    CMP.payload = fresh;
+    $("#compare-view").innerHTML = renderCompare(fresh);
+
+    // If the row was expanded, re-render its detail block
+    if (CMP.expandedSwings.has(rowIdx)) renderCompareRowDetail(rowIdx);
+
+    toast(`Retried row ${rowIdx} on run #${runId}`);
+  } catch (e) {
+    if (btnEl) { btnEl.textContent = "ERROR · ↺ retry"; btnEl.style.pointerEvents = ""; }
+    toast(`Retry failed: ${e.message}`);
+  }
 }
 
 function onCompareFilter(e) {
