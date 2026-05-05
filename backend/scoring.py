@@ -58,11 +58,11 @@ _STOP = {
     "blended", "whipped", "toasted", "mashed", "crushed",
     "chopped", "sliced", "grated", "ground", "shredded",
     "peeled", "seeded", "deboned", "minced",
-    # Flavour-prep descriptors — describe HOW it was seasoned, not WHAT it is.
-    # Macro impact (a teaspoon of spice) is captured by the dish-level macros;
-    # ingredient identity should not be penalised for "shawarma-spiced" vs
-    # "seasoned" or "marinated chicken" vs "chicken".
-    "spiced", "seasoned", "marinated", "herbed", "flavoured", "flavored",
+    # NOTE: flavour-prep words (spiced / seasoned / marinated / herbed /
+    # flavoured) are deliberately KEPT in the comparison. They describe a
+    # real difference between SKUs (shawarma-spiced chicken ≠ plain chicken)
+    # even though both share the same head noun. Per user request the
+    # matcher stays conservative on naming.
 }
 # DELIBERATELY NOT in _STOP — identity-bearing modifiers that change the
 # product itself (different macros, different SKU). Keeping these AND
@@ -118,17 +118,22 @@ def _sim_pair(a: set[str], b: set[str]) -> float:
     b_id = b & _IDENTITY_MODS
     if a_id and b_id and not (a_id & b_id):
         return 0.0
-    # True-subset bonus — give full credit when one bag of tokens is wholly
-    # inside the other (e.g. {dates} ⊆ {dates, deglet, nour}).
-    if a <= b or b <= a:
-        return 1.0
-    # Short-name coincidence guard: when both sides reduce to ≤2 tokens and
-    # share only 1, that 1 is likely a generic head noun ("juice", "oil",
-    # "bun") rather than evidence of the same product. Reject — F1 of 0.50
-    # in these cases falsely paired e.g. "strawberry juice" with "watermelon
-    # juice" or "olive oil" with "vegetable oil".
-    if len(a) <= 2 and len(b) <= 2 and inter < 2:
+    # Short-name coincidence guard: trigger ONLY when both sides have
+    # ≤2 tokens, share exactly 1, AND have non-shared tokens on BOTH sides.
+    # That last condition is what distinguishes a real disagreement
+    # ("strawberry juice" vs "watermelon juice" — qualifier conflict) from
+    # a containment case ("zucchini" vs "zucchini" after stop-removal, or
+    # "milk" vs "milk, full-fat" — one side is just less specific). The
+    # subset cases fall through to F1.
+    if (len(a) <= 2 and len(b) <= 2 and inter < 2
+            and not (a <= b or b <= a)):
         return 0.0
+    # Plain F1 — no subset/containment bonus.
+    # Earlier code returned 1.0 whenever a ⊆ b, but that gave full credit
+    # to "chicken, breast" matching "chicken, breast, shawarma-spiced",
+    # which the user flagged as too generous. Letting F1 stand on its own
+    # produces honest similarity scores: 0.80 for that case, 0.67 for
+    # {milk} vs {milk, full-fat}, 1.0 only when sets are actually equal.
     return (2.0 * inter) / (len(a) + len(b))
 
 
