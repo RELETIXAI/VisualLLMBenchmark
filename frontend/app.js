@@ -56,6 +56,11 @@ const ACTIVE = { runId: null, expanded: true, expandedRows: new Set(), rawExpand
 // Independent state for the read-only Runs-tab review (so it doesn't fight
 // the live poll's ACTIVE state).
 const REVIEW = { runId: null, expandedRows: new Set(), rawExpanded: new Set(), model_id: "" };
+// Comparison-view state: which run-ids are loaded fully, which shared-row
+// idxs are expanded into deep details, and a free-text filter.
+const CMP = { ids: [], fullRuns: {}, expandedSwings: new Set(),
+              cardState: { expandedRows: new Set(), rawExpanded: new Set() },
+              filter: "", payload: null };
 
 function onRawToggle(e, idx) {
   // Use ACTIVE if a live poll is on, REVIEW otherwise
@@ -457,6 +462,14 @@ async function deleteRunSingle(id) {
 async function openCompareView() {
   const ids = [...LB.selected].sort((a,b) => a-b);
   if (ids.length < 2) return toast("Pick at least 2 runs.");
+  // Reset comparison state so a brand-new selection doesn't inherit
+  // stale expansion / cached run data from a previous comparison.
+  CMP.ids = ids;
+  CMP.fullRuns = {};
+  CMP.expandedSwings = new Set();
+  CMP.cardState = { expandedRows: new Set(), rawExpanded: new Set() };
+  CMP.filter = "";
+  CMP.payload = null;
   const box = $("#compare-view");
   box.innerHTML = `<div class="card"><p class="muted">Loading comparison for runs ${ids.join(", ")}…</p></div>`;
   let data;
@@ -570,19 +583,39 @@ function renderCompare(d) {
       </svg>
     </div>`;
 
-  // Biggest swings table
-  const swings = d.biggest_swings || [];
-  const swingsTable = swings.length ? `
-    <h4 style="margin:14px 0 8px">Biggest score swings — top ${swings.length} of ${d.n_shared} shared rows</h4>
+  // ALL shared rows (not just top 10). Deep-detail expand on every row.
+  const allShared = d.shared_rows || [];
+  CMP.payload = d;
+  const filt = (CMP.filter || "").toLowerCase().trim();
+  const visibleShared = !filt ? allShared : allShared.filter(s => {
+    const truth = (s.truth_food || "").toLowerCase();
+    if (truth.includes(filt)) return true;
+    if (String(s.row_idx).includes(filt)) return true;
+    for (const r of runs) {
+      const bd = s.by_run[String(r.id)] || {};
+      if ((bd.pred_food || "").toLowerCase().includes(filt)) return true;
+    }
+    return false;
+  });
+
+  const sharedTable = !allShared.length ? `<p class="muted">No shared rows between selected runs.</p>` : `
+    <div class="row-between" style="align-items:center;margin:14px 0 8px">
+      <h4 style="margin:0">All shared rows · ${visibleShared.length} of ${allShared.length} (sorted by score spread)</h4>
+      <input type="search" id="cmp-filter" value="${escape(CMP.filter)}"
+             placeholder="filter by row idx, truth, or model output…"
+             oninput="onCompareFilter(event)" style="width:280px" />
+    </div>
     <table class="cmp-table cmp-rows">
       <thead><tr>
-        <th></th><th>Row</th><th>Truth food</th><th>Spread</th>
+        <th></th><th></th><th>Row</th><th>Truth food</th><th>Spread</th>
         ${runs.map(r => `<th>#${r.id} score · pred</th>`).join("")}
       </tr></thead>
       <tbody>
-      ${swings.map(s => {
+      ${visibleShared.map(s => {
         const imgSrc = s.image_ref && s.image_ref.startsWith("http") ? s.image_ref : (s.image_ref ? `/images/${s.image_ref.split('/').pop()}` : null);
-        return `<tr>
+        const expanded = CMP.expandedSwings.has(s.row_idx);
+        const headerRow = `<tr class="cmp-row-head ${expanded?'is-open':''}" data-row-idx="${s.row_idx}">
+          <td><button class="cmp-toggle" onclick="toggleCompareDetails(${s.row_idx})" aria-expanded="${expanded}">${expanded?'▾':'▸'}</button></td>
           <td>${imgSrc ? `<img class="thumb" data-src="${escape(imgSrc)}" data-caption="${escape(s.truth_food||"")}" src="${imgSrc}" loading="lazy" referrerpolicy="no-referrer" />` : ""}</td>
           <td class="num">${s.row_idx}</td>
           <td class="small">${escape(s.truth_food||"—")}</td>
@@ -595,9 +628,18 @@ function renderCompare(d) {
             return `<td class="small"><span class="num" style="color:${c};font-weight:600">${(ov*100).toFixed(0)}%</span> · ${pred}</td>`;
           }).join("")}
         </tr>`;
+        // Detail row (rendered as a single colspan cell that holds the per-run cards)
+        const detailRow = expanded ? `<tr class="cmp-row-detail-tr" data-row-idx="${s.row_idx}">
+          <td colspan="${5 + runs.length}">
+            <div id="cmp-detail-${s.row_idx}" class="cmp-row-detail">
+              <div class="muted small">Loading…</div>
+            </div>
+          </td>
+        </tr>` : "";
+        return headerRow + detailRow;
       }).join("")}
       </tbody>
-    </table>` : `<p class="muted">No shared rows between selected runs.</p>`;
+    </table>`;
 
   const ids = runs.map(r => r.id).join(",");
   return `
@@ -618,8 +660,80 @@ function renderCompare(d) {
 
       <h4 style="margin:18px 0 8px" class="cmp-h">Per-nutrient accuracy heatmap</h4>
       ${nutTable}
-      ${swingsTable}
+      ${sharedTable}
     </div>`;
+}
+
+function onCompareFilter(e) {
+  CMP.filter = e.target.value || "";
+  // Re-render only the table area in place; preserve focus/cursor on the input
+  const cur = document.activeElement;
+  const sel = (cur && cur.id === "cmp-filter") ? cur.selectionStart : null;
+  if (CMP.payload) $("#compare-view").innerHTML = renderCompare(CMP.payload);
+  if (sel != null) {
+    const inp = $("#cmp-filter");
+    if (inp) { inp.focus(); try { inp.setSelectionRange(sel, sel); } catch(e) {} }
+  }
+}
+
+async function toggleCompareDetails(rowIdx) {
+  if (CMP.expandedSwings.has(rowIdx)) {
+    CMP.expandedSwings.delete(rowIdx);
+    if (CMP.payload) $("#compare-view").innerHTML = renderCompare(CMP.payload);
+    return;
+  }
+  CMP.expandedSwings.add(rowIdx);
+  if (CMP.payload) $("#compare-view").innerHTML = renderCompare(CMP.payload);
+  await renderCompareRowDetail(rowIdx);
+}
+
+async function ensureFullRunCached(runId) {
+  if (CMP.fullRuns[runId]) return CMP.fullRuns[runId];
+  const r = await api.run(runId);
+  CMP.fullRuns[runId] = r;
+  return r;
+}
+
+async function renderCompareRowDetail(rowIdx) {
+  const target = document.getElementById(`cmp-detail-${rowIdx}`);
+  if (!target) return;
+  const ids = (CMP.payload?.runs || []).map(r => r.id);
+
+  // Pull all runs in parallel; cache hits are instant.
+  const runs = await Promise.all(ids.map(id => ensureFullRunCached(id)));
+
+  // Pre-fill the inner card state so each card renders fully expanded.
+  CMP.cardState.expandedRows.add(rowIdx);
+
+  const blocks = runs.map(run => {
+    const rr = (run.rows || []).find(x => x.row_idx === rowIdx);
+    if (!rr) {
+      return `<div class="cmp-detail-block">
+        <div class="cmp-detail-label"><span class="pill">#${run.id}</span> ${escape(run.model_id||"")}</div>
+        <p class="muted small">Row ${rowIdx} not present in this run.</p>
+      </div>`;
+    }
+    const card = renderRowCard(rr, {
+      state: CMP.cardState,
+      modelId: run.model_id || "",
+      runId: run.id,
+      datasetId: run.dataset_id,
+      toggleFn: (idx) => toggleCompareCardCollapse(idx),
+    });
+    return `<div class="cmp-detail-block">
+      <div class="cmp-detail-label"><span class="pill">#${run.id}</span> ${escape(run.model_id||"")} <span class="muted small">· prompt #${run.prompt_id}</span></div>
+      ${card}
+    </div>`;
+  }).join("");
+
+  target.innerHTML = blocks;
+}
+
+function toggleCompareCardCollapse(idx) {
+  if (CMP.cardState.expandedRows.has(idx)) CMP.cardState.expandedRows.delete(idx);
+  else CMP.cardState.expandedRows.add(idx);
+  // Re-render every visible detail block (only those for currently-expanded swings)
+  for (const rowIdx of CMP.expandedSwings) renderCompareRowDetail(rowIdx);
 }
 
 function closeCompareView() { $("#compare-view").innerHTML = ""; }
