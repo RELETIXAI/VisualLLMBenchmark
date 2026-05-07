@@ -118,6 +118,70 @@ _GENERIC_CATEGORY_TOKENS = {
 }
 
 
+# Domain synonyms — applied BEFORE tokenisation so two strings expressing
+# the same ingredient with different vocabulary collapse to identical
+# token sets and score 1.0 via the token pipeline alone (no semantic
+# fallback needed).
+#
+# Only bidirectional certainties go here. If any reasonable doubt
+# remains about whether two terms denote the same SKU (e.g. yogurt vs
+# labneh — same base food, different processing/water content), leave
+# them out and let token + semantic logic do its honest job. This list
+# is intentionally short and curated for the benchmark's Middle Eastern
+# / Mediterranean food domain.
+#
+# Format: canonical → list of equivalent phrases. The phrases get
+# replaced (case-insensitive, word-boundary-safe) with the canonical
+# before _tokens() runs.
+SYNONYMS: dict[str, list[str]] = {
+    # Middle Eastern / Levantine
+    "tahini":     ["sesame paste", "tahina", "tahin"],
+    "mutabbal":   ["baba ganoush", "baba ghanoush", "moutabal", "muttabal"],
+    "hummus":     ["hommos", "hummous", "houmous"],
+    "labneh":     ["labne", "labna"],
+    "ghee":       ["samneh", "samna", "clarified butter"],
+    "halloumi":   ["halloum"],
+    "shawarma":   ["shwarma", "shawerma"],
+    "kibbeh":     ["kibbe", "kebbeh", "kibbi"],
+    "manakish":   ["manaqish", "manoushe", "manakeesh"],
+    "fattoush":   ["fattouche", "fatoush"],
+    "tabbouleh":  ["taboulleh", "taboule", "tabouli"],
+    "molokhia":   ["mlukhiyah", "molokhiya", "moroheya", "mloukhia"],
+    "freekeh":    ["frekeh", "frikeh", "freek"],
+    "bulgur":     ["bulgar", "burghul", "cracked wheat"],
+    "fava":       ["broad bean", "broad beans", "ful"],
+    "kishk":      ["kashk"],
+    # English botanical / regional synonyms common in food labels
+    "eggplant":   ["aubergine", "brinjal"],
+    "cilantro":   ["coriander leaves", "fresh coriander"],
+    "scallion":   ["green onion", "spring onion"],
+    "chickpea":   ["garbanzo", "garbanzo bean"],
+    "zucchini":   ["courgette"],
+    "arugula":    ["rocket"],
+    "bell_pepper":["bell pepper", "capsicum", "sweet pepper"],
+    "yogurt":     ["yoghurt"],
+}
+
+# Build a (phrase → canonical) lookup, longest-phrase-first so multi-word
+# phrases like "sesame paste" are tried before single words.
+_SYN_LOOKUP: list[tuple[re.Pattern, str]] = []
+for canonical, phrases in SYNONYMS.items():
+    for phrase in sorted(set(phrases) | {canonical}, key=lambda p: -len(p)):
+        # \b word boundaries so "olive oil" doesn't gobble part of "olive-oil-cured"
+        pat = re.compile(r"\b" + re.escape(phrase) + r"\b", re.IGNORECASE)
+        _SYN_LOOKUP.append((pat, canonical))
+# Sort overall list by phrase length descending so longest matches first
+_SYN_LOOKUP.sort(key=lambda x: -len(x[0].pattern))
+
+
+def _apply_synonyms(s: str) -> str:
+    if not s:
+        return s
+    for pat, canonical in _SYN_LOOKUP:
+        s = pat.sub(canonical, s)
+    return s
+
+
 _PAREN_RE = re.compile(r"\(([^)]*)\)")
 
 
@@ -161,7 +225,13 @@ def _stem(t: str) -> str:
 def _tokens(s: str) -> set[str]:
     if not s:
         return set()
-    toks = {_stem(t) for t in re.findall(r"[a-z0-9]+", str(s).lower()) if len(t) > 1}
+    # Apply synonym normalisation BEFORE tokenisation so multi-word
+    # phrases (e.g. "sesame paste" → "tahini") collapse cleanly. After
+    # this, "tahini, sesame paste" tokenises to {"tahini"} (because
+    # "sesame paste" was rewritten to a duplicate "tahini") and matches
+    # a pred of "tahini" at 1.0 through the token pipeline alone.
+    s = _apply_synonyms(str(s).lower())
+    toks = {_stem(t) for t in re.findall(r"[a-z0-9_]+", s) if len(t) > 1}
     # Drop generic descriptors that don't carry food identity
     return toks - _STOP if len(toks) > 1 else toks
 
