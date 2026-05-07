@@ -70,6 +70,10 @@ class RunIn(BaseModel):
     weights: Optional[dict] = None
     max_rows: Optional[int] = None
     random_sample: bool = True
+    # If True, restrict the run to rows whose image is already cached
+    # locally. Avoids any S3/network image fetch during the run — useful
+    # for testing or for offline evaluation on a partial hydrate.
+    local_only_images: bool = False
 
 
 # ---------- meta ----------
@@ -380,6 +384,7 @@ def post_run(r: RunIn):
         api_key=api_key, base_url=r.base_url,
         user_prompt=r.user_prompt, pricing_override=r.pricing_override,
         weights=r.weights, max_rows=r.max_rows, random_sample=r.random_sample,
+        local_only_images=r.local_only_images,
     )
     return {"run_id": run_id}
 

@@ -1493,7 +1493,31 @@ async function refreshBenchmarkForm() {
   $("#r-dataset").innerHTML = CACHE.datasets.map(d => `<option value="${d.id}">${escape(d.name)} (${d.n_rows})</option>`).join("");
   onProviderChange();
   $("#r-provider").onchange = onProviderChange;
+  $("#r-dataset").onchange = onDatasetChange;
+  $("#r-localonly").onchange = onDatasetChange;
   $("#refresh-models").onclick = (e) => { e.preventDefault(); fetchModels(); };
+  onDatasetChange();
+}
+
+async function onDatasetChange() {
+  const dsId = $("#r-dataset")?.value;
+  const hint = $("#r-localonly-hint");
+  if (!dsId || !hint) return;
+  // Only fetch the cache count when the user has the toggle in view
+  try {
+    const s = await api.hydrationStatus(parseInt(dsId));
+    const c = s.cached || 0;
+    const t = s.total || 0;
+    hint.textContent = ` · ${c.toLocaleString()} of ${t.toLocaleString()} cached`;
+    if ($("#r-localonly").checked && c === 0) {
+      hint.style.color = "var(--red)";
+      hint.textContent += " — hydrate first or this run will fail";
+    } else {
+      hint.style.color = "";
+    }
+  } catch (e) {
+    hint.textContent = "";
+  }
 }
 
 const PROVIDER_INFO = {
@@ -1633,6 +1657,7 @@ async function startRun() {
     max_rows:   $("#r-maxrows").value ? parseInt($("#r-maxrows").value) : null,
   };
   body.random_sample = $("#r-randsample").checked;
+  body.local_only_images = $("#r-localonly").checked;
   const pin  = parseFloat($("#r-pricein").value);
   const pout = parseFloat($("#r-priceout").value);
   if (!isNaN(pin) || !isNaN(pout)) {

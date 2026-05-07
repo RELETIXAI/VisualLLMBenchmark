@@ -119,19 +119,36 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
                   max_rows: int | None,
                   image_url_template: str | None,
                   random_sample: bool,
-                  dataset_id_for_corrections: int | None = None) -> None:
+                  dataset_id_for_corrections: int | None = None,
+                  local_only_images: bool = False) -> None:
     controls = _get_controls(run_id)
     try:
         import random
         ds = parse_dataset(dataset_path, image_url_template=image_url_template,
                            dataset_id=dataset_id_for_corrections)
         rows = ds["rows"]
+        # Filter to rows whose image is already cached locally — useful for
+        # offline / partial-hydrate evaluation. Apply BEFORE max_rows so the
+        # sample is taken from the available pool, not from the full set.
+        if local_only_images and dataset_id_for_corrections:
+            ds_id = dataset_id_for_corrections
+            rows = [r for r in rows
+                    if (iid := _stable_image_id(r))
+                    and image_cache.has_local(ds_id, iid)]
+            if not rows:
+                db.update_run(run_id, status="failed",
+                              finished_at=time.time(),
+                              error="local_only_images=true but no rows have a cached image. Hydrate the dataset first.")
+                return
         if max_rows and max_rows < len(rows):
             if random_sample:
                 rng = random.Random(42)
                 rows = rng.sample(rows, max_rows)
             else:
                 rows = rows[:max_rows]
+        # Update n_rows to reflect what we'll actually run (so the progress
+        # bar and aggregate denominators match reality).
+        db.update_run(run_id, n_rows=len(rows))
         provider = get_provider(provider_name, api_key=api_key, base_url=base_url)
 
         latencies, accs = [], []
@@ -220,19 +237,22 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
               pricing_override: dict | None = None,
               weights: dict | None = None,
               max_rows: int | None = None,
-              random_sample: bool = True) -> int:
+              random_sample: bool = True,
+              local_only_images: bool = False) -> int:
     prompt = db.get_prompt(prompt_id)
     dataset = db.get_dataset(dataset_id)
     if not prompt or not dataset:
         raise ValueError("Prompt or dataset not found")
 
+    # n_rows shown in the create row; the runner will refine it once it
+    # knows how many rows survive the local-only filter.
     n = dataset["n_rows"] if not max_rows else min(max_rows, dataset["n_rows"])
     # Pin the run to the dataset version that's current at start time
     pinned_version = db.current_dataset_version(dataset_id)
     config = {"user_prompt": user_prompt, "pricing_override": pricing_override,
               "weights": weights, "max_rows": max_rows, "base_url": base_url,
               "random_sample": random_sample, "pinned_version": pinned_version,
-              "api_key": api_key}
+              "api_key": api_key, "local_only_images": local_only_images}
     run_id = db.create_run(prompt_id=prompt_id, dataset_id=dataset_id,
                            provider=provider_name, model_id=model_id, n_rows=n, config=config)
     # Stamp dataset_version on the run row
@@ -251,7 +271,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
                     weights=weights, max_rows=max_rows,
                     image_url_template=dataset.get("image_url_template"),
                     random_sample=random_sample,
-                    dataset_id_for_corrections=dataset["id"]),
+                    dataset_id_for_corrections=dataset["id"],
+                    local_only_images=local_only_images),
     )
     th.start()
     return run_id

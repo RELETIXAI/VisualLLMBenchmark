@@ -197,6 +197,12 @@
           <label class="small muted" style="display:flex;align-items:center;gap:6px;margin-top:6px">
             <input type="checkbox" id="r-randsample" checked style="width:auto" /> random sample (seed=42)
           </label>
+          <label class="small muted" style="display:flex;align-items:center;gap:6px;margin-top:6px"
+                 title="Skip rows whose image hasn't been hydrated. No S3 traffic during this run.">
+            <input type="checkbox" id="r-localonly" style="width:auto" />
+            Use only locally cached images
+            <span id="r-localonly-hint" class="muted small"></span>
+          </label>
         </div>
         <div>
           <label class="label">Pricing override per Mtok (in / out)</label>
