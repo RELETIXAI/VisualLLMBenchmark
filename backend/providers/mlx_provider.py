@@ -141,7 +141,8 @@ class MLXProvider(BaseProvider):
                     model, processor,
                     image=img_arg,
                     prompt=prompt,
-                    max_tokens=2048,
+                    max_tokens=8192,    # generous cap so dishes with long
+                                        # ingredient lists don't truncate
                     verbose=False,
                 )
 

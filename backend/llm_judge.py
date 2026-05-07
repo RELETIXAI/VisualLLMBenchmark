@@ -307,7 +307,7 @@ def _call_mlx(model_id: str, system: str, user: str) -> str:
     full = f"{system}\n\n{user}"
     prompt = apply_chat_template(processor, config, full, num_images=0)
     output = generate(model, processor, prompt=prompt, image=None,
-                      max_tokens=2048, verbose=False)
+                      max_tokens=8192, verbose=False)
     return output if isinstance(output, str) else getattr(output, "text", str(output))
 
 
@@ -344,7 +344,7 @@ def _call_anthropic(model, system, user, api_key):
     import anthropic
     cli = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
     r = cli.messages.create(
-        model=model, max_tokens=2048,
+        model=model, max_tokens=8192,
         system=system,
         messages=[{"role": "user", "content": user}],
         temperature=0,
