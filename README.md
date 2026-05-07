@@ -7,11 +7,33 @@ system prompt, and race **OpenAI · Anthropic · Gemini · Ollama · LM Studio**
 
 ## Quickstart
 
+Requires **Python 3.13+** (mlx-vlm 0.3+ requires Python ≥ 3.10; we test on 3.13).
+
 ```bash
-cp .env.example .env          # paste your API keys
-.venv/bin/python scripts/make_sample.py    # optional: generate a tiny demo dataset
-./run.sh                       # http://localhost:8765
+# One-time setup
+brew install python@3.13                                    # if you don't have it
+python3.13 -m venv .venv
+.venv/bin/pip install -r requirements.txt                   # ~2-3 GB, ~1 min
+cp .env.example .env                                        # paste your API keys
+.venv/bin/python scripts/make_sample.py                     # optional: tiny demo dataset
+
+# Run
+./run.sh                                                    # http://localhost:8765
 ```
+
+Or double-click **`Reletix Benchmark.command`** in Finder (kills any prior server,
+re-binds the port, opens the browser, streams logs to a Terminal window).
+
+### Optional dependencies
+
+- **`sentence-transformers`** is in `requirements.txt` — enables semantic
+  matching for ingredients. First use downloads `all-MiniLM-L6-v2` (~80 MB).
+  If you skip it the matcher gracefully falls back to token-based F1.
+- **MLX** (`mlx`, `mlx-lm`, `mlx-vlm`) is also in `requirements.txt` — enables
+  running vision LLMs directly on Apple Silicon with no external server. Tested
+  with `mlx-vlm 0.5+` which supports `gemma3`, `gemma4`, `qwen2_vl`,
+  `qwen2_5_vl`, `qwen3_vl`, `pixtral`, `llava-*`, `idefics2/3`, `mllama`,
+  `molmo`, `phi3_v`, `paligemma`, `smolvlm`, and ~50 others.
 
 ## How scoring works
 
