@@ -1574,8 +1574,15 @@ async function fetchModels() {
   }
   const details = r.details || (r.models||[]).map(id => ({id, label: id, group:"current", input:0, output:0}));
   if (!details.length) {
-    sel.innerHTML = `<option value="">— none found${r.error?`: ${escape(r.error)}`:""} —</option>`;
-    cnt.textContent = `(0 models${r.error?` · ${escape(r.error)}`:""})`;
+    sel.innerHTML = `<option value="">— none found —</option>`;
+    if (r.error) {
+      // The backend includes actionable text for connection failures
+      // ("In LM Studio open the Developer tab and click 'Start Server'
+      // (default port 1234)…"). Show it on its own line so it's readable.
+      cnt.innerHTML = `<span style="color:var(--red)">${escape(r.error)}</span>`;
+    } else {
+      cnt.textContent = "(0 models)";
+    }
     return;
   }
   const groups = {current: [], legacy: []};

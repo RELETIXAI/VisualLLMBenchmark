@@ -116,19 +116,36 @@ def models(provider: str, base_url: Optional[str] = None):
         if p == "ollama":
             import httpx
             base = (base_url or "http://localhost:11434").rstrip("/")
-            r = httpx.get(f"{base}/api/tags", timeout=5)
+            try:
+                r = httpx.get(f"{base}/api/tags", timeout=5)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as ce:
+                return {"models": [], "details": [],
+                        "error": f"Cannot reach Ollama at {base}. "
+                                 f"Start it with `ollama serve` (or open the Ollama app), "
+                                 f"then click 'refresh list'. ({type(ce).__name__})"}
             local = [{"id": m["name"], "label": m["name"], "input": 0, "output": 0,
                       "group": "current"} for m in r.json().get("models", [])]
             return {"models": [m["id"] for m in local], "details": local}
         if p in ("lmstudio", "lm_studio", "lm-studio"):
             import httpx
             base = (base_url or "http://localhost:1234/v1").rstrip("/")
-            r = httpx.get(f"{base}/models", timeout=5)
+            try:
+                r = httpx.get(f"{base}/models", timeout=5)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as ce:
+                return {"models": [], "details": [],
+                        "error": f"Cannot reach LM Studio at {base}. "
+                                 f"In LM Studio open the Developer tab and click "
+                                 f"'Start Server' (default port 1234). "
+                                 f"Then click 'refresh list'. ({type(ce).__name__})"}
             local = [{"id": m["id"], "label": m["id"], "input": 0, "output": 0,
                       "group": "current"} for m in r.json().get("data", [])]
+            if not local:
+                return {"models": [], "details": [],
+                        "error": "LM Studio server is up but no model is loaded. "
+                                 "Load a model in LM Studio first, then refresh."}
             return {"models": [m["id"] for m in local], "details": local}
     except Exception as e:
-        return {"models": [], "details": [], "error": str(e)}
+        return {"models": [], "details": [], "error": f"{type(e).__name__}: {e}"}
 
     # MLX: scan local disk for actually-installed models
     if p == "mlx":
@@ -162,12 +179,28 @@ def models(provider: str, base_url: Optional[str] = None):
                 ) or bool(_glob.glob(_os.path.join(model_dir, "*.safetensors")))
                 if not has_weights:
                     continue
-                # Check vision capability
-                is_vision = any(k in data for k in (
-                    "vision_config", "image_token_index", "vision_model_type",
+                # Check vision capability — keys vary by model family. We
+                # match on whatever signal is present in config.json:
+                #   • LLaVA-style:    vision_config / image_token_index
+                #   • Gemma 3/4:      image_token_id / vision_soft_tokens_per_image
+                #                     / boi_token_id / eoi_token_id
+                #   • Qwen2-VL:       vision_config / pixel_shuffle_factor
+                #   • Generic:        any "image_*" / "video_*" / "vision_*"
+                #     token field, or a "*ConditionalGeneration" /
+                #     "*VisionLanguage*" / "*VLM*" / "*Vision*" architecture.
+                vision_keys = {
+                    "vision_config", "vision_model_type", "vision_soft_tokens_per_image",
+                    "image_token_index", "image_token_id",
                     "pixel_shuffle_factor", "visual",
-                )) or any(a for a in (data.get("architectures") or [])
-                          if "VisionLanguage" in a or "VLM" in a or "Vision" in a)
+                    "boi_token_id", "eoi_token_id", "video_token_id",
+                }
+                is_vision = (
+                    any(k in data for k in vision_keys)
+                    or any(a for a in (data.get("architectures") or [])
+                           if any(tag in a for tag in
+                                  ("VisionLanguage", "VLM", "Vision",
+                                   "ConditionalGeneration", "MultiModal")))
+                )
                 model_type = data.get("model_type", "")
                 label = _os.path.basename(model_dir)
                 size_bytes = sum(
