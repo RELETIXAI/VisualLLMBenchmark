@@ -8,11 +8,60 @@ import time
 import traceback
 from typing import Any
 
-from . import db
+from . import db, image_cache
 from .parser import parse_dataset
 from .pricing import cost_usd
 from .providers import get_provider
 from .scoring import score_row, composite_score
+from pathlib import Path
+import hashlib
+
+
+def _stable_image_id(row: dict) -> str | None:
+    """Cache key for a row's image, regardless of origin."""
+    iid = row.get("image_id")
+    if iid: return iid
+    if row.get("image_url"):
+        return "url-" + hashlib.sha1(row["image_url"].encode()).hexdigest()[:16]
+    if row.get("image_path"):
+        return Path(row["image_path"]).stem
+    return None
+
+
+def _ensure_local_image(row: dict, dataset_id: int) -> str | None:
+    """Resolve a row to a local resized JPEG path. Downloads + resizes
+    on-demand if missing. Returns absolute path string or None if there
+    is no image at all for this row."""
+    iid = _stable_image_id(row)
+    if not iid:
+        return None
+    if image_cache.has_local(dataset_id, iid):
+        return str(image_cache.cache_path(dataset_id, iid))
+    try:
+        if row.get("image_url"):
+            p = image_cache.fetch_and_cache(dataset_id, iid, row["image_url"])
+            return str(p)
+        if row.get("image_path"):
+            p = image_cache.cache_local_file(dataset_id, iid, row["image_path"])
+            return str(p)
+    except Exception:
+        # Fall through; provider call will fail with a clean error in the row
+        return None
+    return None
+
+
+def _image_ref_for_row(local_path: str | None, row: dict) -> str | None:
+    """Return a path relative to data/images/ when the file lives in the
+    cache, so the frontend can serve it as /images/<rel>. Falls back to
+    the original ref (URL or extracted-image filename) when nothing was
+    cached locally."""
+    if local_path:
+        try:
+            rel = Path(local_path).relative_to(image_cache.IMAGES_DIR)
+            return str(rel)  # e.g. "6/abc123.jpg"
+        except ValueError:
+            pass
+    return row.get("image_path") or row.get("image_id") or row.get("image_url")
 
 _ENV_KEY_MAP = {
     "openai": "OPENAI_API_KEY",
@@ -103,10 +152,11 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
             if db_status not in ("running", "paused", "pending"):
                 return
 
+            local_img = _ensure_local_image(row, dataset_id_for_corrections or 0)
             res = provider.run(
                 system_prompt=system_prompt,
-                image_path=row.get("image_path"),
-                image_url=row.get("image_url"),
+                image_path=local_img,
+                image_url=None,    # Local-only — providers never fetch URLs
                 model_id=model_id,
                 user_prompt=user_prompt,
             )
@@ -120,7 +170,10 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
             }
             row_cost = cost_usd(res.input_tokens, res.output_tokens, model_id, provider_name, pricing_override)
 
-            image_ref = row.get("image_url") or row.get("image_path") or row.get("image_id")
+            # Stored as path RELATIVE to data/images/ — frontend serves
+            # via /images/<rel>. The original S3 URL is no longer round-
+            # tripped after hydration.
+            image_ref = _image_ref_for_row(local_img, row)
             truth_payload = {
                 "food": row.get("food"),
                 "description": row.get("description"),
@@ -233,10 +286,11 @@ def retry_row(run_id: int, row_idx: int, api_key: str | None = None,
 
     provider = get_provider(run["provider"], api_key=resolved_key, base_url=resolved_base)
 
+    local_img = _ensure_local_image(target_row, run["dataset_id"])
     res = provider.run(
         system_prompt=prompt["system_prompt"],
-        image_path=target_row.get("image_path"),
-        image_url=target_row.get("image_url"),
+        image_path=local_img,
+        image_url=None,    # Local-only — providers never fetch URLs
         model_id=run["model_id"],
         user_prompt=config.get("user_prompt"),
     )
@@ -252,7 +306,7 @@ def retry_row(run_id: int, row_idx: int, api_key: str | None = None,
 
     row_cost = cost_usd(res.input_tokens, res.output_tokens, run["model_id"],
                         run["provider"], config.get("pricing_override"))
-    image_ref = target_row.get("image_url") or target_row.get("image_path") or target_row.get("image_id")
+    image_ref = _image_ref_for_row(local_img, target_row)
     truth_payload = {
         "food": target_row.get("food"),
         "description": target_row.get("description"),

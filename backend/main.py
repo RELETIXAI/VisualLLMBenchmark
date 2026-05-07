@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, runner
+from . import db, image_cache, runner, tasks
 from .parser import parse_dataset
 from .pricing import PRICING
 from .providers import PROVIDERS
@@ -533,17 +533,34 @@ def rescore_run(run_id: int, version: Optional[int] = None):
 def rescore_all_runs_for_dataset(dataset_id: int):
     """Bulk re-score every completed run against this dataset. Use after
     saving multiple corrections to bring the leaderboard up to date.
+
+    Runs synchronously but reports progress via /api/tasks so the user can
+    see "Re-scoring 7 runs · 3/7" in the ongoing-tasks panel while it works.
     """
     runs = db.list_runs(dataset_id=dataset_id, status="completed")
+    if not runs:
+        return {"rescored_runs": [], "n": 0}
+    ds = db.get_dataset(dataset_id)
+    label = f"Re-scoring {len(runs)} run(s) for '{ds['name'] if ds else dataset_id}'"
+    tid = tasks.register("rescore", label, total=len(runs),
+                         meta={"dataset_id": dataset_id})
     summaries = []
-    for r in runs:
-        try:
-            res = rescore_run(r["id"])
-            summaries.append({"run_id": r["id"], **{k: res[k] for k in
-                ("rows_changed","accuracy_before","accuracy_after",
-                 "composite_before","composite_after")}})
-        except HTTPException as e:
-            summaries.append({"run_id": r["id"], "error": e.detail})
+    try:
+        for i, r in enumerate(runs):
+            if tasks.is_cancelled(tid):
+                break
+            tasks.update(tid, progress=i, label=f"{label} · run #{r['id']}")
+            try:
+                res = rescore_run(r["id"])
+                summaries.append({"run_id": r["id"], **{k: res[k] for k in
+                    ("rows_changed","accuracy_before","accuracy_after",
+                     "composite_before","composite_after")}})
+            except HTTPException as e:
+                summaries.append({"run_id": r["id"], "error": e.detail})
+        tasks.complete(tid, label=f"Re-scored {len(summaries)} run(s)")
+    except Exception as e:
+        tasks.fail(tid, str(e))
+        raise
     return {"rescored_runs": summaries, "n": len(summaries)}
 
 
@@ -583,6 +600,132 @@ def delete_run(run_id: int):
     if full["status"] in ("running", "paused", "pending"):
         runner.cancel_run(run_id)
     return db.delete_run(run_id)
+
+
+# ---------- background tasks visibility ----------
+@app.get("/api/tasks")
+def list_tasks():
+    """All active and recently-finished background tasks. Polled by the
+    frontend ongoing-task panel every few seconds. Includes live runs."""
+    out = list(tasks.list_active())
+    # Surface live runs (which manage their own status via db.runs.status)
+    # alongside ad-hoc tasks so the user has a single feed.
+    for r in db.list_runs(status=None) or []:
+        if r["status"] not in ("running", "paused", "pending"):
+            continue
+        out.append({
+            "id": f"run-{r['id']}",
+            "kind": "run",
+            "label": f"Run #{r['id']} · {r['model_id']} · {r['n_done']}/{r['n_rows']}",
+            "status": r["status"],
+            "progress": r["n_done"],
+            "total": r["n_rows"],
+            "started_at": r["started_at"],
+            "finished_at": r.get("finished_at"),
+            "error": r.get("error"),
+            "meta": {"run_id": r["id"]},
+        })
+    out.sort(key=lambda t: t.get("started_at", 0), reverse=True)
+    return {"tasks": out}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str):
+    """Cooperative cancel for ad-hoc tasks; for live runs, calls runner.cancel_run."""
+    if task_id.startswith("run-"):
+        try:
+            rid = int(task_id.split("-", 1)[1])
+        except ValueError:
+            raise HTTPException(400, "bad run task id")
+        ok = runner.cancel_run(rid)
+        return {"cancelled": bool(ok)}
+    ok = tasks.cancel(task_id)
+    return {"cancelled": bool(ok)}
+
+
+# ---------- image hydration (no more S3 fetches at run time) ----------
+@app.post("/api/datasets/{dataset_id}/hydrate")
+def hydrate_dataset(dataset_id: int):
+    """Download + resize every image in the dataset to the local cache.
+    Idempotent: already-cached images are skipped. Runs in a background
+    thread; progress is reported via /api/tasks."""
+    ds = db.get_dataset(dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+
+    parsed = parse_dataset(ds["file_path"], image_url_template=ds.get("image_url_template"),
+                           dataset_id=dataset_id)
+    rows = parsed.get("rows") or []
+    if not rows:
+        return {"hydrated": 0, "skipped": 0, "errors": 0, "total": 0}
+
+    label = f"Hydrating images for '{ds['name']}'"
+    tid = tasks.register("hydrate", label, total=len(rows),
+                         meta={"dataset_id": dataset_id})
+
+    import threading
+    import httpx
+    def _work():
+        cached = skipped = errors = 0
+        with httpx.Client(timeout=image_cache.HTTP_TIMEOUT, follow_redirects=True) as cli:
+            for i, row in enumerate(rows):
+                if tasks.is_cancelled(tid):
+                    return
+                try:
+                    iid = _stable_image_id(row)
+                    if not iid:
+                        skipped += 1
+                    elif image_cache.has_local(dataset_id, iid):
+                        skipped += 1
+                    elif row.get("image_url"):
+                        image_cache.fetch_and_cache(dataset_id, iid,
+                                                    row["image_url"], client=cli)
+                        cached += 1
+                    elif row.get("image_path"):
+                        image_cache.cache_local_file(dataset_id, iid, row["image_path"])
+                        cached += 1
+                    else:
+                        skipped += 1
+                except Exception as e:
+                    errors += 1
+                    tasks.update(tid, meta={"last_error": str(e)[:200]})
+                tasks.update(tid, progress=i + 1,
+                             meta={"cached": cached, "skipped": skipped, "errors": errors})
+        tasks.complete(tid, label=f"Hydrated {cached} new · {skipped} already cached · {errors} errors")
+
+    threading.Thread(target=_work, daemon=True).start()
+    return {"task_id": tid, "total": len(rows)}
+
+
+def _stable_image_id(row: dict) -> Optional[str]:
+    """Derive a stable cache key for a row's image regardless of source."""
+    iid = row.get("image_id")
+    if iid: return iid
+    if row.get("image_url"):
+        import hashlib
+        return "url-" + hashlib.sha1(row["image_url"].encode()).hexdigest()[:16]
+    if row.get("image_path"):
+        return Path(row["image_path"]).stem
+    return None
+
+
+@app.get("/api/datasets/{dataset_id}/hydration_status")
+def hydration_status(dataset_id: int):
+    """Quick check: how many rows have a local resized image cached?"""
+    ds = db.get_dataset(dataset_id)
+    if not ds:
+        raise HTTPException(404, "Dataset not found")
+    parsed = parse_dataset(ds["file_path"], image_url_template=ds.get("image_url_template"),
+                           dataset_id=dataset_id)
+    rows = parsed.get("rows") or []
+    cached = needs = 0
+    for row in rows:
+        iid = _stable_image_id(row)
+        if iid and image_cache.has_local(dataset_id, iid):
+            cached += 1
+        else:
+            needs += 1
+    return {"total": len(rows), "cached": cached, "needs_hydration": needs}
 
 
 @app.get("/api/leaderboard/{prompt_id}")
@@ -1127,7 +1270,19 @@ def _render_compare_markdown(payload: dict) -> str:
 
 @app.get("/api/compare")
 def get_compare(ids: str):
-    return _build_compare(_parse_id_list(ids))
+    id_list = _parse_id_list(ids)
+    tid = tasks.register("compare", f"Comparing runs {','.join(map(str, id_list))}",
+                         meta={"run_ids": id_list})
+    try:
+        out = _build_compare(id_list)
+        tasks.complete(tid, label=f"Compare {','.join(map(str, id_list))} ready")
+        return out
+    except HTTPException as e:
+        tasks.fail(tid, str(e.detail))
+        raise
+    except Exception as e:
+        tasks.fail(tid, str(e))
+        raise
 
 
 @app.get("/api/compare.md")

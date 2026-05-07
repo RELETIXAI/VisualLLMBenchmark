@@ -48,6 +48,11 @@ const api = {
   exportBundle:(params) => `/api/export?${new URLSearchParams(params).toString()}`,
   importPreview: (file) => { const fd = new FormData(); fd.append("file", file); return fetch("/api/import/preview", {method:"POST", body:fd}).then(r => r.json()); },
   importApply:  (token) => fetch("/api/import/apply", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({import_token: token})}).then(r => r.json()),
+  // Background tasks + image hydration
+  tasks:       ()      => fetch("/api/tasks").then(r => r.json()),
+  cancelTask:  (id)    => fetch(`/api/tasks/${encodeURIComponent(id)}/cancel`, {method:"POST"}).then(r => r.json()),
+  hydrateDs:   (id)    => fetch(`/api/datasets/${id}/hydrate`, {method:"POST"}).then(r => r.json()),
+  hydrationStatus: (id) => fetch(`/api/datasets/${id}/hydration_status`).then(r => r.json()),
 };
 
 const LB = { selected: new Set(), filters: {provider:"", model_id:"", prompt_id:"", dataset_id:"", status:""}, bestOnly: false, runs: [] };
@@ -633,7 +638,7 @@ function renderCompare(d) {
       </tr></thead>
       <tbody>
       ${visibleShared.map(s => {
-        const imgSrc = s.image_ref && s.image_ref.startsWith("http") ? s.image_ref : (s.image_ref ? `/images/${s.image_ref.split('/').pop()}` : null);
+        const imgSrc = resolveImageUrl(s.image_ref);
         const expanded = CMP.expandedSwings.has(s.row_idx);
         const headerRow = `<tr class="cmp-row-head ${expanded?'is-open':''}" data-row-idx="${s.row_idx}">
           <td><button class="cmp-toggle" onclick="toggleCompareDetails(${s.row_idx})" aria-expanded="${expanded}">${expanded?'▾':'▸'}</button></td>
@@ -880,6 +885,9 @@ async function refreshDatasets() {
           </div>
           <div style="display:flex;gap:6px">
             <button class="btn-ghost" onclick="toggleDsView(${d.id})" id="ds-toggle-${d.id}">View rows</button>
+            <button class="btn-ghost" onclick="hydrateDataset(${d.id})"
+                    id="ds-hydrate-${d.id}"
+                    title="Download every image to local cache (resized 1024px JPEG). After this, runs never fetch from S3.">↓ Hydrate images</button>
             <button class="btn-ghost btn-danger-text" onclick="deleteDataset(${d.id}, '${escape(d.name).replace(/'/g,"\\'")}')">Delete</button>
           </div>
         </div>
@@ -1171,7 +1179,7 @@ function closeCustomModal() {
 }
 
 function renderDsRow(r, dsId) {
-  const src = r.image_url || (r.image_path ? `/images/${r.image_path.split('/').pop()}` : null);
+  const src = resolveImageUrl(r.image_path) || resolveImageUrl(r.image_url);
   const nut = r.nutrition_truth || {};
   const cells = [
     ["kcal", nut.calories],
@@ -1251,9 +1259,7 @@ async function doUpload(file) {
 function renderPreview(rows) {
   return `<div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
     ${rows.map(r => {
-      const src = r.image_url ? r.image_url
-                : r.image_path ? `/images/${r.image_path.split('/').pop()}`
-                : null;
+      const src = resolveImageUrl(r.image_path) || resolveImageUrl(r.image_url);
       return `
       <div style="flex:1;min-width:200px;border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--paper)">
         ${src ? `<img class="thumb" src="${src}" loading="lazy" />` : '<div class="thumb" style="background:var(--paper-2)"></div>'}
@@ -1838,7 +1844,7 @@ async function promoteToTruth(rowResultId, runId, datasetId, imageId, mode) {
   const op    = JSON.parse(rr.output_parsed || "{}");
   const truth = JSON.parse(rr.truth || "{}");
   const ref   = rr.image_ref || "";
-  const imageUrl = ref.startsWith("http") ? ref : (ref ? `/images/${ref.split("/").pop()}` : null);
+  const imageUrl = resolveImageUrl(ref);
 
   TRUTH_EDIT.datasetId = datasetId;
   TRUTH_EDIT.imageId   = imageId;
@@ -2259,7 +2265,7 @@ function renderRowCard(rr, opts) {
   const ok = !rr.error;
   const expanded = state.expandedRows.has(rr.row_idx);
   const img = rr.image_ref || "";
-  const imgSrc = img.startsWith("http") ? img : (img ? `/images/${img.split('/').pop()}` : null);
+  const imgSrc = resolveImageUrl(img);
   const ts = rr.id ? new Date().toLocaleString() : "";
 
   // ---- top stat tiles ----
@@ -2451,6 +2457,26 @@ function escape(s) {
 }
 function fmtNum(n) { return (n||0).toLocaleString(); }
 
+// Resolve an image reference to a URL the browser can load.
+// Handles three storage formats stored in image_ref over time:
+//   1. Full http(s) URL          → return as-is
+//   2. New layout "<dsId>/<file>" (from data/images/ subfolder) → /images/<rel>
+//   3. Legacy filename only      → /images/<filename>
+// Either way, the path is normalised to a single-slash /images/ URL.
+function resolveImageUrl(ref) {
+  if (!ref) return null;
+  if (typeof ref !== "string") return null;
+  if (ref.startsWith("http://") || ref.startsWith("https://")) return ref;
+  // Strip any absolute prefix that might have leaked in (defensive)
+  let rel = ref;
+  const idx = rel.indexOf("data/images/");
+  if (idx >= 0) rel = rel.slice(idx + "data/images/".length);
+  // If it still has slashes it's the dataset-scoped layout; encode each
+  // segment so funny image_ids don't break the URL
+  rel = rel.split("/").map(encodeURIComponent).join("/");
+  return `/images/${rel}`;
+}
+
 // ─── Export ──────────────────────────────────────────────────────────────────
 
 async function openExportModal() {
@@ -2627,4 +2653,131 @@ async function applyImport() {
   }
 }
 
+// ─── Hydration ─────────────────────────────────────────────────────────────
+async function hydrateDataset(dsId) {
+  const status = await api.hydrationStatus(dsId);
+  if (status.needs_hydration === 0) {
+    toast(`All ${status.total} images already cached locally.`);
+    return;
+  }
+  const yes = confirm(
+    `Hydrate ${status.needs_hydration} image(s) for this dataset?\n\n` +
+    `Each image is downloaded once, resized to 1024px, saved as JPEG q85, ` +
+    `and reused for every future run. After this completes, your runs no ` +
+    `longer fetch from S3.\n\n` +
+    `${status.cached} of ${status.total} are already cached.`
+  );
+  if (!yes) return;
+  try {
+    const r = await api.hydrateDs(dsId);
+    toast(`Hydration started (${r.total} rows). See progress in the ongoing-tasks panel.`);
+    refreshTasksPanel();
+  } catch (e) {
+    toast("Hydrate failed: " + (e.message || e));
+  }
+}
+
+// ─── Ongoing-tasks panel ───────────────────────────────────────────────────
+const TASKS_PANEL = { polling: false, collapsed: false, lastCount: 0 };
+
+function _ensureTasksPanel() {
+  let panel = document.getElementById("tasks-panel");
+  if (panel) return panel;
+  panel = document.createElement("div");
+  panel.id = "tasks-panel";
+  panel.className = "tasks-panel hidden";
+  panel.innerHTML = `
+    <div class="tasks-head">
+      <span id="tasks-count">0 tasks</span>
+      <button class="link-btn" id="tasks-collapse" onclick="toggleTasksPanel()">▾</button>
+    </div>
+    <div class="tasks-body" id="tasks-body"></div>`;
+  document.body.appendChild(panel);
+  return panel;
+}
+
+function toggleTasksPanel() {
+  TASKS_PANEL.collapsed = !TASKS_PANEL.collapsed;
+  const panel = document.getElementById("tasks-panel");
+  const btn = document.getElementById("tasks-collapse");
+  if (!panel || !btn) return;
+  panel.classList.toggle("collapsed", TASKS_PANEL.collapsed);
+  btn.textContent = TASKS_PANEL.collapsed ? "▴" : "▾";
+}
+
+function _renderTask(t) {
+  const isDone = ["completed","failed","cancelled"].includes(t.status);
+  const bar = (t.total && t.progress != null)
+    ? `<div class="task-bar"><span style="width:${Math.min(100, 100*t.progress/Math.max(1,t.total)).toFixed(1)}%"></span></div>
+       <div class="muted small">${t.progress}/${t.total}${t.meta && t.meta.cached!=null ? ` · ${t.meta.cached} cached, ${t.meta.skipped||0} skipped${t.meta.errors?', '+t.meta.errors+' errors':''}` : ""}</div>`
+    : (isDone ? "" : `<div class="task-spinner"></div>`);
+  const cancelBtn = isDone ? "" :
+    `<button class="link-btn task-cancel" onclick="cancelOngoingTask('${escape(t.id)}')">cancel</button>`;
+  const statusCls = `task-${t.status}`;
+  const kindIcon = ({
+    rescore: "↻", compare: "≡", hydrate: "↓", semantic: "🧠",
+    run: "▸", other: "•",
+  })[t.kind] || "•";
+  const errLine = t.error ? `<div class="task-err">✗ ${escape(t.error)}</div>` : "";
+  return `
+    <div class="task-row ${statusCls}" data-id="${escape(t.id)}">
+      <div class="task-head">
+        <span class="task-icon">${kindIcon}</span>
+        <span class="task-label">${escape(t.label)}</span>
+        ${cancelBtn}
+      </div>
+      ${bar}
+      ${errLine}
+    </div>`;
+}
+
+async function refreshTasksPanel() {
+  const panel = _ensureTasksPanel();
+  let payload;
+  try { payload = await api.tasks(); }
+  catch (e) { return; }
+  const items = (payload.tasks || []);
+  // Show panel only when there's at least one active task or a recently
+  // finished one (server keeps them visible for ~5 minutes).
+  if (items.length === 0) {
+    panel.classList.add("hidden");
+    TASKS_PANEL.lastCount = 0;
+    return;
+  }
+  panel.classList.remove("hidden");
+  const active = items.filter(t => !["completed","failed","cancelled"].includes(t.status)).length;
+  $("#tasks-count").textContent = active
+    ? `${active} active task${active===1?"":"s"}`
+    : `${items.length} recent task${items.length===1?"":"s"}`;
+  $("#tasks-body").innerHTML = items.map(_renderTask).join("");
+  // Auto-refresh leaderboard / datasets when a tracked task completes
+  if (active === 0 && TASKS_PANEL.lastCount > 0) {
+    if (typeof reloadLeaderboardTable === "function") reloadLeaderboardTable();
+    if (typeof refreshDatasets === "function" &&
+        document.getElementById("view-datasets") &&
+        !document.getElementById("view-datasets").classList.contains("hidden")) {
+      refreshDatasets();
+    }
+  }
+  TASKS_PANEL.lastCount = active;
+}
+
+async function cancelOngoingTask(taskId) {
+  try {
+    await api.cancelTask(taskId);
+    toast("Cancellation requested.");
+    refreshTasksPanel();
+  } catch (e) {
+    toast("Cancel failed: " + (e.message || e));
+  }
+}
+
+function startTasksPolling() {
+  if (TASKS_PANEL.polling) return;
+  TASKS_PANEL.polling = true;
+  const tick = () => { refreshTasksPanel().finally(() => setTimeout(tick, 2000)); };
+  tick();
+}
+
 bootstrap();
+startTasksPolling();

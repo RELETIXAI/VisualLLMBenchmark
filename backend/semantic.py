@@ -37,7 +37,9 @@ def _ensure_table() -> None:
 
 
 def _try_load_model():
-    """Best-effort load. Sets _AVAILABLE on first call."""
+    """Best-effort load. Sets _AVAILABLE on first call. Reports progress
+    via the tasks registry so the user sees the (potentially long) first
+    download in the ongoing-tasks panel."""
     global _MODEL, _AVAILABLE
     if _MODEL is not None:
         return _MODEL
@@ -46,12 +48,23 @@ def _try_load_model():
     with _LOCK:
         if _MODEL is not None:
             return _MODEL
+        # Register a task so the UI shows what's going on. Avoid a hard
+        # import dependency so semantic.py stays self-contained.
+        tid = None
+        try:
+            from . import tasks as _tasks
+            tid = _tasks.register("semantic", "Loading semantic model (all-MiniLM-L6-v2)…")
+        except Exception:
+            pass
         try:
             from sentence_transformers import SentenceTransformer
             _MODEL = SentenceTransformer("all-MiniLM-L6-v2")
             _AVAILABLE = True
             _ensure_table()
             print("[semantic] all-MiniLM-L6-v2 loaded; semantic matching enabled.")
+            if tid:
+                from . import tasks as _tasks
+                _tasks.complete(tid, label="Semantic model ready")
         except Exception as e:
             _AVAILABLE = False
             _MODEL = None
@@ -59,6 +72,9 @@ def _try_load_model():
             print("[semantic] To enable semantic matching:")
             print("[semantic]   pip install sentence-transformers")
             print("[semantic] Falling back to token-based matching only.")
+            if tid:
+                from . import tasks as _tasks
+                _tasks.fail(tid, f"{type(e).__name__}: {e}. Install with: pip install sentence-transformers")
     return _MODEL
 
 
