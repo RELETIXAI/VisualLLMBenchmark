@@ -7,10 +7,17 @@ venv/
 
 # Data and runtime artefacts (do NOT commit user uploads, DBs, or extracted images)
 data/benchmark.db
+data/benchmark.db-journal
+data/benchmark.db-wal
+data/benchmark.db-shm
 data/uploads/
 data/images/
 data/_tmp_sample_imgs/
+data/_tmp_imports/
 data/sample_food_benchmark.xlsx
+data/embedding_cache.json
+data/machine_id.txt
+backend/benchmark.db
 
 # Secrets
 .env
