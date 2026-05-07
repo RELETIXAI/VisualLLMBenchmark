@@ -110,24 +110,44 @@ def match(pred_list: list[dict], truth_list: list[dict],
 
 # ── prompt + parsing ──────────────────────────────────────────────────────
 
-_SYS_PROMPT = """Match ingredient lists from a food-photo benchmark.
+_SYS_PROMPT = """Match ingredient lists from a food-photo benchmark. 1-to-1 bipartite assignment.
 
-For each TRUTH ingredient, find the MODEL ingredient that names the same item, else leave it unmatched. 1-to-1 assignment.
+SCORE TIERS (be decisive, don't hedge in the middle):
+- 1.00  identical name OR identical-after-removing-prep-words (cooked, raw,
+        fresh, grilled, boiled, sliced, chopped, diced, ground, etc.)
+- 0.95  translation / regional name (tahini=sesame paste,
+        mutabbal=baba ganoush, aubergine=eggplant, cilantro=coriander,
+        garbanzo=chickpea, courgette=zucchini, rocket=arugula) OR
+        plural/singular only (strawberry=strawberries)
+- 0.85  same item, cooking-state difference that *might* affect macros
+        (scrambled vs boiled egg, deep-fried vs baked) OR
+        general-name vs specific-subtype (rice vs basmati rice,
+        cheese vs cheddar) where macros are similar
+- 0.65  composite-vs-decomposition partial: TRUTH names a single composite
+        dish (sponge cake, bread bun, lasagna, cheesecake) and MODEL lists
+        ONE of its main raw ingredients (flour, sugar, eggs, butter).
+        Pair the composite with the most representative raw ingredient,
+        leave the other raw ingredients unmatched. Same in reverse.
+- 0.50  same general food kind, real detail mismatch (chicken whole vs
+        chicken breast, beef stew vs beef chunks)
+- 0.00  different food entirely (chicken!=beef, salmon!=tuna),
+        identity-bearing variant difference (whole milk!=skim milk,
+        brown rice!=white rice), or same form / different content
+        (apple pie!=cherry pie, olive oil!=vegetable oil)
 
-SAME ingredient (score 0.7-1.0):
-- translations: tahini=sesame paste, mutabbal=baba ganoush, aubergine=eggplant, cilantro=coriander, garbanzo=chickpea, courgette=zucchini, rocket=arugula
-- plurals/forms: strawberry=strawberries, tomatoes=tomato
-- cooking state: egg scrambled vs egg boiled (~0.85)
-- general vs specific: "rice" vs "Rice, Basmati" (~0.7)
+REASON FIELD: short category label, NOT a restatement of the names.
+Use one of: identical, translation, plural, cooking-state, general-vs-
+specific, composite-decomposition, subtype-mismatch, different-item,
+identity-conflict. Optionally append " — <one-clause clarification>".
 
-DIFFERENT (score 0.0-0.4):
-- fat variants: whole milk != skim milk
-- grain refinement: brown rice != white rice
-- same form, different filling: apple pie != cherry pie, olive oil != vegetable oil, strawberry juice != watermelon juice
-- different proteins: chicken != beef
+Bad: "chicken breast vs chicken breast"
+Bad: "rice, white, cooked vs cooked rice"
+Good: "identical (prep words ignored)"
+Good: "general-vs-specific — rice covers basmati"
+Good: "composite-decomposition — flour is the main component of cake"
 
-Output ONLY this JSON, no prose:
-{"matches":[{"truth_idx":1,"pred_idx":1,"score":0.95,"reason":"<short>"}],"unmatched_truth":[],"unmatched_pred":[]}
+Output ONLY this JSON, no prose, no markdown fences:
+{"matches":[{"truth_idx":1,"pred_idx":1,"score":0.95,"reason":"<label>"}],"unmatched_truth":[],"unmatched_pred":[]}
 
 Indices are 1-based positions in the lists below."""
 
