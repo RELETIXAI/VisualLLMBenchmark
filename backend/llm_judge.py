@@ -45,14 +45,18 @@ _TABLE_READY = False
 
 def is_configured() -> bool:
     """True iff a judge model is set AND we have credentials for it."""
-    model = (os.environ.get("LLM_JUDGE_MODEL") or DEFAULT_MODEL).lower()
-    if model.startswith(("gpt", "o1")):
+    model = os.environ.get("LLM_JUDGE_MODEL") or DEFAULT_MODEL
+    # MLX local checkpoints are always usable (no API key, no network)
+    if os.path.isdir(model):
+        return True
+    m = model.lower()
+    if m.startswith(("gpt", "o1", "o3", "o4")):
         return bool(os.environ.get("OPENAI_API_KEY"))
-    if model.startswith("claude"):
+    if m.startswith("claude"):
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
-    if model.startswith("gemini"):
+    if m.startswith("gemini"):
         return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    # Local providers (ollama / mlx) don't need a key
+    # Local providers (ollama / mlx via HF identifier) don't need a key
     return True
 
 
@@ -243,14 +247,49 @@ def _call_judge(pred_list, truth_list, model: str, api_key: Optional[str]) -> st
     """One LLM call. Returns raw text response."""
     user = _build_user_prompt(pred_list, truth_list)
     m = model.lower()
+
+    # MLX local checkpoint — model id is a filesystem path. Reuses the
+    # model cache from backend.providers.mlx_provider, so if a benchmark
+    # run already loaded gemma-4-26B-A4B-it-4bit, the judge skips the
+    # 15 GB load and goes straight to inference.
+    if os.path.isdir(model):
+        return _call_mlx(model, _SYS_PROMPT, user)
+
     if m.startswith(("gpt", "o1", "o3", "o4")):
         return _call_openai(model, _SYS_PROMPT, user, api_key)
     if m.startswith("claude"):
         return _call_anthropic(model, _SYS_PROMPT, user, api_key)
     if m.startswith("gemini"):
         return _call_gemini(model, _SYS_PROMPT, user, api_key)
-    # Default: ollama
+
+    # Treat any "namespace/repo[…]" identifier without a colon as an
+    # MLX HuggingFace checkpoint (e.g. "mlx-community/gemma-4-…-4bit").
+    # Ollama uses "name:tag" format, so the colon distinguishes them.
+    if "/" in model and ":" not in model:
+        return _call_mlx(model, _SYS_PROMPT, user)
+
+    # Default: Ollama (for "gemma3:4b", "qwen2.5vl:7b", etc.)
     return _call_ollama(model, _SYS_PROMPT, user)
+
+
+def _call_mlx(model_id: str, system: str, user: str) -> str:
+    """Run text-only inference on an MLX VLM checkpoint. Shares the
+    model cache with backend.providers.mlx_provider so the judge and
+    the benchmark runner don't double-load 15 GB of weights when they
+    happen to use the same model."""
+    from .providers.mlx_provider import _load_model
+    from mlx_vlm import generate
+    from mlx_vlm.prompt_utils import apply_chat_template
+
+    model, processor, config = _load_model(model_id)
+    # Some VLMs require system + user joined for tokeniser; mlx_vlm's
+    # apply_chat_template wants a string, not a messages list. Concat
+    # explicitly so the system block is preserved.
+    full = f"{system}\n\n{user}"
+    prompt = apply_chat_template(processor, config, full, num_images=0)
+    output = generate(model, processor, prompt=prompt, image=None,
+                      max_tokens=2048, verbose=False)
+    return output if isinstance(output, str) else getattr(output, "text", str(output))
 
 
 def _call_openai(model, system, user, api_key):

@@ -2226,42 +2226,109 @@ async function rescoreAllWithJudge(datasetId) {
   return r;
 }
 
-async function pickJudgeConfig() {
-  // Pull server status: which keys are in .env, what's the default model
-  let s = {};
-  try { s = await fetch("/api/judge/status").then(r => r.json()); } catch(e) {}
-  const meta = await api.meta().catch(() => ({env_keys_present: {}}));
-  const present = meta.env_keys_present || {};
+// Persist the user's last judge choice across button clicks within a session.
+const JUDGE_STATE = { provider: "openai", model: "gpt-5-mini", api_key: "", base_url: "" };
 
-  const model = (prompt(
-    "Which model should judge the matching?\n" +
-    "  • OpenAI:    gpt-5-mini, gpt-5-nano, gpt-4.1-mini\n" +
-    "  • Anthropic: claude-haiku-4-5, claude-sonnet-4-6\n" +
-    "  • Gemini:    gemini-2.0-flash-lite\n" +
-    "  • Local:     gemma3:4b, qwen2.5vl:7b (via Ollama)\n\n" +
-    "(Cached: " + (s.cache_size||0) + " judgments — repeats are free)",
-    s.default_model || "gpt-5-mini"
-  ) || "").trim();
-  if (!model) return null;
+// Open the judge modal, return a Promise that resolves to {model, api_key}
+// when the user clicks Run, or null on cancel.
+function pickJudgeConfig() {
+  const modal = $("#judge-modal");
+  return new Promise(async (resolve) => {
+    let s = {};
+    try { s = await fetch("/api/judge/status").then(r => r.json()); } catch(e) {}
+    $("#jm-cache-hint").textContent =
+      `Cached judgments: ${(s.cache_size || 0).toLocaleString()} · repeats are free`;
 
-  // Decide if we need a key
-  const m = model.toLowerCase();
-  let api_key = null;
-  let env_present = false;
-  if (m.startsWith("gpt") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4"))
-    env_present = !!present.OPENAI_API_KEY;
-  else if (m.startsWith("claude")) env_present = !!present.ANTHROPIC_API_KEY;
-  else if (m.startsWith("gemini")) env_present = !!present.GEMINI_API_KEY;
-  else env_present = true;  // local providers don't need a key
+    // Restore last selection
+    $("#jm-provider").value = JUDGE_STATE.provider;
+    $("#jm-model").value    = JUDGE_STATE.model;
+    $("#jm-apikey").value   = JUDGE_STATE.api_key;
+    $("#jm-baseurl").value  = JUDGE_STATE.base_url;
 
-  if (!env_present) {
-    api_key = (prompt(
-      `${model} requires an API key (server's .env doesn't have one).\n` +
-      `It will be used for THIS request only — not stored.`
-    ) || "").trim();
-    if (!api_key) return null;
+    onJudgeProviderChange();
+    fetchJudgeModels();
+
+    $("#jm-provider").onchange       = () => { onJudgeProviderChange(); fetchJudgeModels(); };
+    $("#jm-model-select").onchange   = () => { $("#jm-model").value = $("#jm-model-select").value; };
+    $("#jm-refresh-models").onclick  = (e) => { e.preventDefault(); fetchJudgeModels(); };
+
+    modal.classList.remove("hidden");
+
+    const cleanup = () => {
+      modal.classList.add("hidden");
+      $("#jm-run").onclick = null;
+    };
+    $(".modal-backdrop", modal).onclick = () => { cleanup(); resolve(null); };
+
+    $("#jm-run").onclick = () => {
+      const provider = $("#jm-provider").value;
+      const model    = $("#jm-model").value.trim() || $("#jm-model-select").value.trim();
+      const api_key  = $("#jm-apikey").value.trim();
+      const base_url = $("#jm-baseurl").value.trim();
+      if (!model) { toast("Pick a model first."); return; }
+      // Save for next time
+      Object.assign(JUDGE_STATE, {provider, model, api_key, base_url});
+      cleanup();
+      resolve({model, api_key, base_url});
+    };
+  });
+}
+
+// Mirrors the benchmark form's onProviderChange but for the judge modal.
+function onJudgeProviderChange() {
+  const prov = $("#jm-provider").value;
+  const needsBaseUrl = (prov === "ollama" || prov === "lmstudio");
+  const local = needsBaseUrl || prov === "mlx";
+  $("#jm-apikey-block").classList.toggle("hidden", local);
+  $("#jm-baseurl-block").classList.toggle("hidden", !needsBaseUrl);
+
+  if (prov === "ollama" && !$("#jm-baseurl").value)   $("#jm-baseurl").value = "http://localhost:11434";
+  if (prov === "lmstudio" && !$("#jm-baseurl").value) $("#jm-baseurl").value = "http://localhost:1234/v1";
+
+  // Hint about which env key the server is using
+  const PRESENT = (META && META.env_keys_present) || {};
+  const hint = $("#jm-apikey-hint");
+  if (local) {
+    hint.textContent = "no key needed";
+  } else if (prov === "openai")    hint.textContent = PRESENT.OPENAI_API_KEY    ? "(.env loaded — leave blank)" : "(no .env key — paste yours)";
+  else if (prov === "anthropic") hint.textContent = PRESENT.ANTHROPIC_API_KEY ? "(.env loaded — leave blank)" : "(no .env key — paste yours)";
+  else if (prov === "gemini")    hint.textContent = PRESENT.GEMINI_API_KEY    ? "(.env loaded — leave blank)" : "(no .env key — paste yours)";
+  else hint.textContent = "";
+}
+
+async function fetchJudgeModels() {
+  const prov = $("#jm-provider").value;
+  const base = (prov === "ollama" || prov === "lmstudio") ? $("#jm-baseurl").value : null;
+  const sel  = $("#jm-model-select");
+  const cnt  = $("#jm-models-count");
+  sel.innerHTML = `<option value="">— loading —</option>`;
+  cnt.textContent = "";
+  let r;
+  try { r = await api.models(prov, base); }
+  catch (e) { sel.innerHTML = `<option value="">— error —</option>`; cnt.textContent = `(${e.message})`; return; }
+  const details = r.details || (r.models || []).map(id => ({id, label: id, group: "current"}));
+  if (!details.length) {
+    sel.innerHTML = `<option value="">— none found —</option>`;
+    if (r.error) cnt.innerHTML = `<span style="color:var(--red)">${escape(r.error)}</span>`;
+    else cnt.textContent = "(0 models)";
+    return;
   }
-  return {model, api_key};
+  // Filter MLX list to vision-capable: judge needs reasoning; vision-capable
+  // checkpoints work fine for text too. Text-only MLX checkpoints also work.
+  const opts = details.map(m => {
+    const note = m.notes ? `  · ${m.notes}` : "";
+    return `<option value="${escape(m.id)}" title="${escape(m.label)}${escape(note)}">${escape(m.label)}</option>`;
+  }).join("");
+  sel.innerHTML = `<option value="">— pick a model —</option>` + opts;
+  cnt.textContent = `(${details.length} model${details.length === 1 ? "" : "s"})`;
+  // Pre-select the saved model if present in the list
+  const opt = [...sel.options].find(o => o.value === JUDGE_STATE.model);
+  if (opt) sel.value = JUDGE_STATE.model;
+}
+
+function closeJudgeModal() {
+  const modal = $("#judge-modal");
+  if (modal) modal.classList.add("hidden");
 }
 
 async function rescoreFiltered() {

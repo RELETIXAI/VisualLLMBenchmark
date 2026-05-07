@@ -224,6 +224,61 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<!-- AI Judge config modal — reuses the same provider/model/API-key
+     pickers as the Run benchmark form. -->
+<div id="judge-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close="1"></div>
+  <div class="modal-panel" role="dialog" aria-labelledby="jm-title" style="width:min(560px,96vw)">
+    <div class="modal-head">
+      <div>
+        <h3 id="jm-title" style="margin:0">Pick the AI judge</h3>
+        <div class="muted small" id="jm-subtitle">Used only for ingredient matching — scoring math is unchanged.</div>
+      </div>
+      <button class="btn-ghost" onclick="closeJudgeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="grid-2">
+        <div>
+          <label class="label">Provider</label>
+          <select id="jm-provider">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Gemini</option>
+            <option value="ollama">Ollama (local)</option>
+            <option value="lmstudio">LM Studio (local)</option>
+            <option value="mlx">MLX — Apple Silicon (local)</option>
+          </select>
+        </div>
+        <div>
+          <label class="label">Model
+            <button type="button" class="link-btn" id="jm-refresh-models">refresh list</button>
+            <span class="muted small" id="jm-models-count"></span>
+          </label>
+          <select id="jm-model-select" size="1">
+            <option value="">— pick a model —</option>
+          </select>
+          <input id="jm-model" type="text" placeholder="or type a custom model id" style="margin-top:6px" />
+        </div>
+        <div id="jm-apikey-block">
+          <label class="label">API key <span id="jm-apikey-hint" class="muted small"></span></label>
+          <input id="jm-apikey" type="password" placeholder="paste your key here" autocomplete="off" />
+          <div class="muted small" id="jm-apikey-help" style="margin-top:4px">Used for this request only — not stored.</div>
+        </div>
+        <div id="jm-baseurl-block" class="hidden">
+          <label class="label">Base URL</label>
+          <input id="jm-baseurl" type="text" />
+        </div>
+      </div>
+      <div class="muted small" style="margin-top:14px" id="jm-cache-hint">Cached judgments: 0 (repeats are free)</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-ghost" onclick="closeJudgeModal()">Cancel</button>
+      <div style="flex:1"></div>
+      <button class="btn" id="jm-run">✨ Run AI Judge</button>
+    </div>
+  </div>
+</div>
+
 <!-- Truth editor modal — form-based, opens from any row card -->
 <div id="truth-editor" class="modal hidden">
   <div class="modal-backdrop" data-close="1"></div>
