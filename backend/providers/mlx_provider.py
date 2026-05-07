@@ -30,12 +30,19 @@ _TEXT_ONLY_TYPES = {
 def _check_vision_capable(model_path: str) -> None:
     """Raise ValueError immediately if the model is text-only.
 
-    Detection mirrors the listing logic in backend.main: matches on either
-    a vision-related top-level key OR a known vision/multimodal
-    architecture tag. Covers LLaVA-style (image_token_index), Gemma 3/4
-    (image_token_id, vision_soft_tokens_per_image, boi_token_id, etc.),
-    Qwen2-VL (pixel_shuffle_factor), and generic *ConditionalGeneration /
-    *MultiModal architectures.
+    Three layers of detection, in order of certainty:
+
+      1. Config says the model is text-only (model_type ∈ _TEXT_ONLY_TYPES
+         AND no vision keys at all).
+      2. Config CLAIMS vision (has vision keys, *ConditionalGeneration
+         architecture, etc.) but the safetensors index contains ZERO
+         vision_tower / siglip / embed_vision weights — i.e. the
+         conversion stripped the vision tower while keeping the
+         multimodal config metadata. This is the classic "I converted
+         the text part of a VL model" gotcha. Caught Qwen3.5-MoE and
+         gemma-4-26B-A4B-it being run as VLMs when only the language
+         model was actually converted.
+      3. Otherwise treat as vision-capable and let mlx_vlm decide.
     """
     cfg_path = os.path.join(model_path, "config.json")
     if not os.path.exists(cfg_path):
@@ -51,20 +58,49 @@ def _check_vision_capable(model_path: str) -> None:
         "image_token_index", "image_token_id",
         "pixel_shuffle_factor", "visual",
         "boi_token_id", "eoi_token_id", "video_token_id",
+        "vision_start_token_id", "vision_end_token_id",
     }
-    is_vision = (
+    config_says_vision = (
         any(k in cfg for k in vision_keys)
         or any(a for a in (cfg.get("architectures") or [])
                if any(tag in a for tag in
                       ("VisionLanguage", "VLM", "Vision",
                        "ConditionalGeneration", "MultiModal")))
     )
-    if not is_vision and model_type in _TEXT_ONLY_TYPES:
+    if not config_says_vision and model_type in _TEXT_ONLY_TYPES:
         raise ValueError(
             f"Model '{os.path.basename(model_path)}' is text-only (type: {model_type}) "
-            f"and cannot process images. Download a vision-capable model such as "
+            f"and cannot process images. Pick a vision-capable model such as "
             f"mlx-community/Qwen2.5-VL-7B-Instruct-4bit from LM Studio or HuggingFace."
         )
+
+    # Layer 2: fail fast on text-only conversions of multimodal models.
+    # Read the safetensors index and count vision-tower weights.
+    idx_path = os.path.join(model_path, "model.safetensors.index.json")
+    if config_says_vision and os.path.exists(idx_path):
+        try:
+            with open(idx_path) as f:
+                weight_map = json.load(f).get("weight_map") or {}
+        except Exception:
+            return
+        if not weight_map:
+            return
+        n_vision = sum(1 for k in weight_map
+                       if any(t in k for t in ("vision_tower", "siglip",
+                                                 "embed_vision", "vision_model")))
+        # Multimodal models have hundreds of vision-tower weights
+        # (gemma-4 ~356, qwen3-VL ~393, llava ~250+). Fewer than 20
+        # means the vision tower was not converted.
+        if n_vision < 20:
+            raise ValueError(
+                f"Model '{os.path.basename(model_path)}' was converted text-only: "
+                f"its config.json declares vision capability (model_type={model_type}) "
+                f"but the safetensors contain only {n_vision} vision-tower weights "
+                f"(expected ~250-400). Re-convert from a true VL source — for Qwen, "
+                f"use 'Qwen/Qwen3-VL-*' or 'Qwen/Qwen2.5-VL-*' rather than the "
+                f"text-only Qwen3-MoE; for Gemma, use the multimodal release rather "
+                f"than the language-model-only checkpoint."
+            )
 
 
 def _load_model(model_id: str) -> tuple:

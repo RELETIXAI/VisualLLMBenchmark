@@ -191,6 +191,7 @@ def models(provider: str, base_url: Optional[str] = None):
                 #   • Gemma 3/4:      image_token_id / vision_soft_tokens_per_image
                 #                     / boi_token_id / eoi_token_id
                 #   • Qwen2-VL:       vision_config / pixel_shuffle_factor
+                #   • Qwen3-VL:       vision_start_token_id / vision_end_token_id
                 #   • Generic:        any "image_*" / "video_*" / "vision_*"
                 #     token field, or a "*ConditionalGeneration" /
                 #     "*VisionLanguage*" / "*VLM*" / "*Vision*" architecture.
@@ -199,6 +200,7 @@ def models(provider: str, base_url: Optional[str] = None):
                     "image_token_index", "image_token_id",
                     "pixel_shuffle_factor", "visual",
                     "boi_token_id", "eoi_token_id", "video_token_id",
+                    "vision_start_token_id", "vision_end_token_id",
                 }
                 is_vision = (
                     any(k in data for k in vision_keys)
@@ -207,6 +209,27 @@ def models(provider: str, base_url: Optional[str] = None):
                                   ("VisionLanguage", "VLM", "Vision",
                                    "ConditionalGeneration", "MultiModal")))
                 )
+                # Trust-but-verify: config can claim vision while the
+                # safetensors only contain language_model.* weights (the
+                # classic text-only conversion of a VL source). Peek at
+                # the index and demote to text-only if vision_tower is
+                # absent. Catches Qwen3.5-MoE-as-VL and gemma-4-26B-text.
+                vision_strip = False
+                if is_vision:
+                    idx_path = _os.path.join(model_dir, "model.safetensors.index.json")
+                    if _os.path.exists(idx_path):
+                        try:
+                            with open(idx_path) as fidx:
+                                wm = _json.load(fidx).get("weight_map") or {}
+                            n_vis = sum(1 for k in wm
+                                        if any(t in k for t in
+                                               ("vision_tower", "siglip",
+                                                "embed_vision", "vision_model")))
+                            if wm and n_vis < 20:
+                                is_vision = False
+                                vision_strip = True
+                        except Exception:
+                            pass
                 model_type = data.get("model_type", "")
                 label = _os.path.basename(model_dir)
                 size_bytes = sum(
@@ -216,12 +239,18 @@ def models(provider: str, base_url: Optional[str] = None):
                 )
                 size_str = f"~{size_bytes/1e9:.1f} GB" if size_bytes > 1e8 else ""
                 model_id = model_dir
+                if is_vision:
+                    note = f"vision ✓ · {model_type}"
+                elif vision_strip:
+                    note = f"text-only ✗ (config claimed VL, weights stripped) · {model_type}"
+                else:
+                    note = f"text-only ✗ (no image input) · {model_type}"
                 found.append({
                     "id": model_id,
                     "label": f"{label} {size_str}".strip(),
                     "input": 0, "output": 0,
                     "group": "current",
-                    "notes": f"{'vision ✓' if is_vision else 'text-only ✗ (no image input)'} · {model_type}",
+                    "notes": note,
                 })
         if not found:
             return {"models": [], "details": [],
