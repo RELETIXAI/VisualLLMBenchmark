@@ -187,6 +187,7 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
                 use_llm_judge=judge_with_run_model and not res.error,
                 judge_model=model_id if judge_with_run_model else None,
                 judge_api_key=api_key if judge_with_run_model else None,
+                judge_base_url=base_url if judge_with_run_model else None,
             ) if not res.error else {
                 "food_sim": 0, "desc_sim": 0, "nutrition_per": {}, "macros_avg": 0,
                 "ingredient_f1": 0, "weight_acc": 0, "overall": 0,

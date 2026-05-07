@@ -63,10 +63,16 @@ def is_configured() -> bool:
 def match(pred_list: list[dict], truth_list: list[dict],
           threshold: float = 0.40,
           model: Optional[str] = None,
-          api_key: Optional[str] = None) -> dict:
+          api_key: Optional[str] = None,
+          base_url: Optional[str] = None) -> dict:
     """LLM-judge bipartite match. Same return shape as
     backend.scoring.ingredient_match so the two are drop-in
-    interchangeable."""
+    interchangeable.
+
+    base_url is honoured for OpenAI-compatible local endpoints
+    (LM Studio at http://localhost:1234/v1) and Ollama
+    (http://localhost:11434).
+    """
     pred_list = pred_list or []
     truth_list = truth_list or []
     if not pred_list or not truth_list:
@@ -79,10 +85,21 @@ def match(pred_list: list[dict], truth_list: list[dict],
         return cached
 
     try:
-        raw = _call_judge(pred_list, truth_list, model, api_key)
+        raw = _call_judge(pred_list, truth_list, model, api_key, base_url)
         parsed = _parse_judge_output(raw, pred_list, truth_list)
     except Exception as e:
-        # Degrade gracefully: token matcher is still the safety net.
+        # Friendly degrade: log the cause then fall back to the rule-based
+        # matcher so the run / rescore doesn't break entirely.
+        msg = str(e)
+        if "context length" in msg.lower() or "token" in msg.lower() and "greater than" in msg.lower():
+            print(f"[llm_judge] context overflow on {model}: {msg[:200]}")
+            print("[llm_judge] HINT: in LM Studio, reload the model with a larger "
+                  "n_ctx (8192+); or pick a model with a larger native context.")
+        elif "connect" in msg.lower() or "refused" in msg.lower():
+            print(f"[llm_judge] cannot reach {model}: {msg[:200]}")
+            print("[llm_judge] HINT: is LM Studio's server started, or Ollama running?")
+        else:
+            print(f"[llm_judge] {type(e).__name__}: {msg[:200]}")
         from .scoring import ingredient_match as token_match
         return token_match(pred_list, truth_list, threshold=threshold)
 
@@ -93,40 +110,26 @@ def match(pred_list: list[dict], truth_list: list[dict],
 
 # ── prompt + parsing ──────────────────────────────────────────────────────
 
-_SYS_PROMPT = """You are a culinary expert evaluating how accurately an LLM identified the ingredients of a photographed dish.
+_SYS_PROMPT = """Match ingredient lists from a food-photo benchmark.
 
-Your task: pair each TRUTH ingredient with the MODEL's most appropriate ingredient, OR mark it unmatched if the model didn't include it.
+For each TRUTH ingredient, find the MODEL ingredient that names the same item, else leave it unmatched. 1-to-1 assignment.
 
-Treat these as the SAME ingredient (high score):
-  • Translations and regional names: tahini ≡ sesame paste, mutabbal ≡ baba ganoush, aubergine ≡ eggplant, cilantro ≡ coriander leaves, garbanzo ≡ chickpea, courgette ≡ zucchini, rocket ≡ arugula
-  • Plurals and forms: strawberry ≡ strawberries, tomato ≡ tomatoes
-  • Sub-types where the model used the general name: "rice" against "Rice, Basmati" is a partial-but-strong match
-  • Cooking-state differences: "egg, scrambled" vs "egg, boiled" — same ingredient, different prep
+SAME ingredient (score 0.7-1.0):
+- translations: tahini=sesame paste, mutabbal=baba ganoush, aubergine=eggplant, cilantro=coriander, garbanzo=chickpea, courgette=zucchini, rocket=arugula
+- plurals/forms: strawberry=strawberries, tomatoes=tomato
+- cooking state: egg scrambled vs egg boiled (~0.85)
+- general vs specific: "rice" vs "Rice, Basmati" (~0.7)
 
-Treat these as DIFFERENT ingredients (zero or low score):
-  • Different fat / processing variants: whole milk ≠ skim milk, full-fat yogurt ≠ low-fat yogurt
-  • Different grain refinement: brown rice ≠ white rice, whole wheat bread ≠ white bread
-  • Different fillings sharing a form: apple pie ≠ cherry pie, strawberry juice ≠ watermelon juice, olive oil ≠ vegetable oil
-  • Different proteins: chicken ≠ beef, salmon ≠ tuna
+DIFFERENT (score 0.0-0.4):
+- fat variants: whole milk != skim milk
+- grain refinement: brown rice != white rice
+- same form, different filling: apple pie != cherry pie, olive oil != vegetable oil, strawberry juice != watermelon juice
+- different proteins: chicken != beef
 
-Score each match 0.0–1.0:
-  • 1.00: identical, translation, or trivial plural/form difference
-  • 0.70–0.95: same ingredient with minor sub-type or cooking-state difference
-  • 0.40–0.65: same general food kind but real detail mismatch (chicken whole vs chicken breast)
-  • 0.00–0.30: different ingredients
+Output ONLY this JSON, no prose:
+{"matches":[{"truth_idx":1,"pred_idx":1,"score":0.95,"reason":"<short>"}],"unmatched_truth":[],"unmatched_pred":[]}
 
-The match should be a 1-to-1 assignment (no truth pairs with two preds, no pred pairs with two truths). Pick the strongest available pairing for each.
-
-Output ONLY this JSON, no commentary:
-{
-  "matches": [
-    {"truth_idx": <int>, "pred_idx": <int>, "score": <float>, "reason": "<one short sentence>"}
-  ],
-  "unmatched_truth": [<int>, ...],
-  "unmatched_pred": [<int>, ...]
-}
-
-The `truth_idx` / `pred_idx` are 1-based positions in the lists I send you."""
+Indices are 1-based positions in the lists below."""
 
 
 def _build_user_prompt(pred_list: list[dict], truth_list: list[dict]) -> str:
@@ -243,10 +246,26 @@ def _empty_result(pred_list, truth_list) -> dict:
 
 # ── provider dispatch ─────────────────────────────────────────────────────
 
-def _call_judge(pred_list, truth_list, model: str, api_key: Optional[str]) -> str:
+def _call_judge(pred_list, truth_list, model: str, api_key: Optional[str],
+                base_url: Optional[str] = None) -> str:
     """One LLM call. Returns raw text response."""
     user = _build_user_prompt(pred_list, truth_list)
     m = model.lower()
+
+    # If the caller passed an explicit base_url, that's the strongest
+    # signal: use OpenAI-compat client pointed at it. LM Studio,
+    # vLLM-server, llama-server, anything else OpenAI-compat → all
+    # land here. Ollama is handled below if base_url contains 11434.
+    if base_url:
+        bu = base_url.rstrip("/")
+        if "11434" in bu:
+            return _call_ollama(model, _SYS_PROMPT, user, base_url=bu)
+        # Default for any /v1 OpenAI-compat endpoint (LM Studio,
+        # llama-server, vLLM, etc.). LM Studio doesn't require a key
+        # — we pass a dummy if none was provided.
+        return _call_openai(model, _SYS_PROMPT, user,
+                            api_key=api_key or "lm-studio",
+                            base_url=bu)
 
     # MLX local checkpoint — model id is a filesystem path. Reuses the
     # model cache from backend.providers.mlx_provider, so if a benchmark
@@ -292,16 +311,32 @@ def _call_mlx(model_id: str, system: str, user: str) -> str:
     return output if isinstance(output, str) else getattr(output, "text", str(output))
 
 
-def _call_openai(model, system, user, api_key):
+def _call_openai(model, system, user, api_key, base_url: Optional[str] = None):
     from openai import OpenAI
-    cli = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
-    r = cli.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
-        response_format={"type": "json_object"},
-        temperature=0,
-    )
+    kwargs = {"api_key": api_key or os.environ.get("OPENAI_API_KEY") or "sk-no-key"}
+    if base_url:
+        kwargs["base_url"] = base_url
+    cli = OpenAI(**kwargs)
+    # response_format=json_object isn't universally supported on OpenAI-
+    # compatible local endpoints (LM Studio honours it; some llama-server
+    # builds reject it). Try with first, retry without on TypeError /
+    # BadRequestError-from-the-server-side parameter rejection.
+    base_messages = [{"role": "system", "content": system},
+                     {"role": "user", "content": user}]
+    try:
+        r = cli.chat.completions.create(
+            model=model, messages=base_messages,
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+    except Exception as e:
+        # Common signatures: "response_format' is not supported", "json mode"
+        if "response_format" in str(e) or "json" in str(e).lower():
+            r = cli.chat.completions.create(
+                model=model, messages=base_messages, temperature=0,
+            )
+        else:
+            raise
     return r.choices[0].message.content or ""
 
 
@@ -327,9 +362,9 @@ def _call_gemini(model, system, user, api_key):
     return r.text or ""
 
 
-def _call_ollama(model, system, user):
+def _call_ollama(model, system, user, base_url: Optional[str] = None):
     import httpx
-    base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    base = (base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
     r = httpx.post(f"{base}/api/chat", timeout=180,
                    json={
                        "model": model,

@@ -552,7 +552,8 @@ def health_score(pred: str | None, truth: str | None) -> dict:
 # ----------- row-level scoring -----------
 def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
               use_llm_judge: bool = False, judge_model: str | None = None,
-              judge_api_key: str | None = None) -> dict:
+              judge_api_key: str | None = None,
+              judge_base_url: str | None = None) -> dict:
     """Returns full scoring detail used by both leaderboard and per-row UI.
 
     When `use_llm_judge=True`, the ingredient matching step uses an LLM
@@ -582,7 +583,8 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
         ing = llm_judge.match(pred_ings_in, truth_ings_in,
                               threshold=INGREDIENT_MATCH_THRESHOLD,
                               model=judge_model,
-                              api_key=judge_api_key)
+                              api_key=judge_api_key,
+                              base_url=judge_base_url)
     else:
         ing = ingredient_match(pred_ings_in, truth_ings_in)
     ing_f1 = ing["f1"]

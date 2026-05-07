@@ -2185,6 +2185,7 @@ async function rescoreRun(runId, opts = {}) {
   if (opts.judge) body.judge = true;
   if (opts.judge_model) body.judge_model = opts.judge_model;
   if (opts.judge_api_key) body.judge_api_key = opts.judge_api_key;
+  if (opts.judge_base_url) body.judge_base_url = opts.judge_base_url;
   toast(`Re-scoring run #${runId}${opts.judge ? " with AI judge" : ""}…`);
   const r = await fetch(`/api/runs/${runId}/rescore`, {
     method:"POST",
@@ -2208,7 +2209,9 @@ async function rescoreRunWithJudge(runId) {
   const cfg = await pickJudgeConfig();
   if (!cfg) return;
   return rescoreRun(runId, {
-    judge: true, judge_model: cfg.model, judge_api_key: cfg.api_key,
+    judge: true, judge_model: cfg.model,
+    judge_api_key: cfg.api_key,
+    judge_base_url: cfg.base_url,
   });
 }
 
@@ -2217,9 +2220,6 @@ async function rescoreAllWithJudge(datasetId) {
   if (!cfg) return;
   toast(`Re-scoring all runs with AI judge (${cfg.model})…`);
   const params = new URLSearchParams({judge: "true", judge_model: cfg.model});
-  // The dataset rescore_all currently iterates rescore_run server-side,
-  // which already accepts judge_api_key in body. Re-use rescoreAllForDataset
-  // but tag the URL so the server picks judge mode for every inner call.
   const url = `/api/datasets/${datasetId}/rescore_all?${params.toString()}`;
   const r = await fetch(url, {method:"POST"}).then(r=>r.json());
   toast(`AI-judge re-scored ${r.n||0} run(s).`);

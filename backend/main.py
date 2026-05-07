@@ -472,6 +472,7 @@ class RescoreIn(BaseModel):
     judge: bool = False
     judge_model: Optional[str] = None
     judge_api_key: Optional[str] = None  # optional override; falls back to env
+    judge_base_url: Optional[str] = None  # for LM Studio / Ollama / vLLM
 
 
 @app.post("/api/runs/{run_id}/rescore")
@@ -544,7 +545,8 @@ def rescore_run(run_id: int,
                 pred = {}
             new_scores = score_row(pred, truth_row,
                                    use_llm_judge=judge,
-                                   judge_model=judge_model)
+                                   judge_model=judge_model,
+                                   judge_base_url=(body.judge_base_url if body else None))
             old_scores = _json.loads(r["scores"] or "{}")
             old_overall = (old_scores or {}).get("overall") or 0
             new_overall = (new_scores or {}).get("overall") or 0
