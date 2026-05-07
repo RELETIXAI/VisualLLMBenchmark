@@ -550,8 +550,15 @@ def health_score(pred: str | None, truth: str | None) -> dict:
 
 
 # ----------- row-level scoring -----------
-def score_row(pred: dict, truth_row: dict, weights: dict | None = None) -> dict:
-    """Returns full scoring detail used by both leaderboard and per-row UI."""
+def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
+              use_llm_judge: bool = False, judge_model: str | None = None) -> dict:
+    """Returns full scoring detail used by both leaderboard and per-row UI.
+
+    When `use_llm_judge=True`, the ingredient matching step uses an LLM
+    judge (see backend.llm_judge) instead of the rule-based bipartite
+    matcher. The scoring math (tolerance bands, weights, F1, weight_acc)
+    is identical in both modes — only the matching decision changes.
+    """
     w = {**OVERALL_WEIGHTS, **(weights or {})}
 
     name_sim = text_similarity(pred.get("food"), truth_row.get("food"))
@@ -561,9 +568,16 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None) -> dict:
                                  truth_row.get("nutrition_truth") or {})
     macros_avg = weighted_avg(nut_per)
 
-    # Ingredients
-    ing = ingredient_match(pred.get("ingredients") or [],
-                           truth_row.get("ingredients_truth") or [])
+    # Ingredients — either rule-based or LLM-as-judge.
+    pred_ings_in = pred.get("ingredients") or []
+    truth_ings_in = truth_row.get("ingredients_truth") or []
+    if use_llm_judge:
+        from . import llm_judge
+        ing = llm_judge.match(pred_ings_in, truth_ings_in,
+                              threshold=INGREDIENT_MATCH_THRESHOLD,
+                              model=judge_model)
+    else:
+        ing = ingredient_match(pred_ings_in, truth_ings_in)
     ing_f1 = ing["f1"]
     weight_acc = ing["weight_acc"]
 

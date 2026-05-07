@@ -861,7 +861,8 @@ async function refreshDatasets() {
              </span>
              <button class="btn-ghost" onclick="openVersionsTimeline(${d.id})">View timeline</button>
              <button class="btn-ghost" onclick="toggleDsView(${d.id}, {only_corrected:true})">See ${uniqueImgs} corrected row${uniqueImgs===1?"":"s"}</button>
-             <button class="btn-ghost" onclick="rescoreAllForDataset(${d.id})" title="Re-score every completed run against the latest truth">↻ Re-score all runs</button>`
+             <button class="btn-ghost" onclick="rescoreAllForDataset(${d.id})" title="Re-score every completed run against the latest truth (rule-based matcher)">↻ Re-score all runs</button>
+             <button class="btn-ghost" onclick="rescoreAllWithJudge(${d.id})" title="Re-score with the LLM-as-judge matcher — semantic ingredient pairing via an actual LLM call. Cached per (truth, pred) pair so repeats are free.">✨ AI Judge re-score</button>`
           : `<span class="muted small">no corrections yet — promote a model output or edit truth on any row to start versioning</span>`
         }
       </div>`;
@@ -1415,6 +1416,7 @@ function renderReviewBody(r) {
           ${escape(r.prompt_name||"")} · ${escape(r.provider)} · ${r.n_done}/${r.n_rows} rows · ${(r.avg_latency_ms/1000||0).toFixed(2)}s/row · ${fmtNum(r.total_input_tokens)} in / ${fmtNum(r.total_output_tokens)} out
         </div>
         <button class="btn-ghost" onclick="rescoreRun(${r.id})" title="Recompute scores against the latest truth + corrections (no model calls)">↻ Re-score</button>
+        <button class="btn-ghost" onclick="rescoreRunWithJudge(${r.id})" title="Re-score with LLM-as-judge ingredient matcher (semantic, cached)">✨ AI Judge</button>
       </div>
       ${renderReviewStats(r)}
     </div>
@@ -2177,17 +2179,89 @@ async function teSave() {
 // Re-score plumbing (no API calls, just recompute scores from stored
 // predictions against the corrected truth).
 // =====================================================================
-async function rescoreRun(runId) {
-  toast(`Re-scoring run #${runId}…`);
-  const r = await fetch(`/api/runs/${runId}/rescore`, {method:"POST"}).then(r=>r.json());
+async function rescoreRun(runId, opts = {}) {
+  const body = {};
+  if (opts.judge) body.judge = true;
+  if (opts.judge_model) body.judge_model = opts.judge_model;
+  if (opts.judge_api_key) body.judge_api_key = opts.judge_api_key;
+  toast(`Re-scoring run #${runId}${opts.judge ? " with AI judge" : ""}…`);
+  const r = await fetch(`/api/runs/${runId}/rescore`, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(body),
+  }).then(r=>r.json());
   toast(
     `Run #${runId} re-scored · ${r.rows_changed} row${r.rows_changed===1?"":"s"} changed · ` +
     `${(r.accuracy_before*100).toFixed(1)}% → ${(r.accuracy_after*100).toFixed(1)}%`
   );
-  // Refresh the affected views
   if (LB && typeof reloadLeaderboardTable === "function") reloadLeaderboardTable();
   if (REVIEW.runId === runId) loadRunDrawer(runId);
   return r;
+}
+
+// LLM-as-judge wrapper. Asks the user once for a model + key (if not in
+// .env), then triggers a normal rescore with judge=true. The judge
+// caches per (truth, pred) pair, so re-scoring the same dataset later
+// with the same model is free — no LLM calls.
+async function rescoreRunWithJudge(runId) {
+  const cfg = await pickJudgeConfig();
+  if (!cfg) return;
+  return rescoreRun(runId, {
+    judge: true, judge_model: cfg.model, judge_api_key: cfg.api_key,
+  });
+}
+
+async function rescoreAllWithJudge(datasetId) {
+  const cfg = await pickJudgeConfig();
+  if (!cfg) return;
+  toast(`Re-scoring all runs with AI judge (${cfg.model})…`);
+  const params = new URLSearchParams({judge: "true", judge_model: cfg.model});
+  // The dataset rescore_all currently iterates rescore_run server-side,
+  // which already accepts judge_api_key in body. Re-use rescoreAllForDataset
+  // but tag the URL so the server picks judge mode for every inner call.
+  const url = `/api/datasets/${datasetId}/rescore_all?${params.toString()}`;
+  const r = await fetch(url, {method:"POST"}).then(r=>r.json());
+  toast(`AI-judge re-scored ${r.n||0} run(s).`);
+  if (typeof reloadLeaderboardTable === "function") reloadLeaderboardTable();
+  return r;
+}
+
+async function pickJudgeConfig() {
+  // Pull server status: which keys are in .env, what's the default model
+  let s = {};
+  try { s = await fetch("/api/judge/status").then(r => r.json()); } catch(e) {}
+  const meta = await api.meta().catch(() => ({env_keys_present: {}}));
+  const present = meta.env_keys_present || {};
+
+  const model = (prompt(
+    "Which model should judge the matching?\n" +
+    "  • OpenAI:    gpt-5-mini, gpt-5-nano, gpt-4.1-mini\n" +
+    "  • Anthropic: claude-haiku-4-5, claude-sonnet-4-6\n" +
+    "  • Gemini:    gemini-2.0-flash-lite\n" +
+    "  • Local:     gemma3:4b, qwen2.5vl:7b (via Ollama)\n\n" +
+    "(Cached: " + (s.cache_size||0) + " judgments — repeats are free)",
+    s.default_model || "gpt-5-mini"
+  ) || "").trim();
+  if (!model) return null;
+
+  // Decide if we need a key
+  const m = model.toLowerCase();
+  let api_key = null;
+  let env_present = false;
+  if (m.startsWith("gpt") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4"))
+    env_present = !!present.OPENAI_API_KEY;
+  else if (m.startsWith("claude")) env_present = !!present.ANTHROPIC_API_KEY;
+  else if (m.startsWith("gemini")) env_present = !!present.GEMINI_API_KEY;
+  else env_present = true;  // local providers don't need a key
+
+  if (!env_present) {
+    api_key = (prompt(
+      `${model} requires an API key (server's .env doesn't have one).\n` +
+      `It will be used for THIS request only — not stored.`
+    ) || "").trim();
+    if (!api_key) return null;
+  }
+  return {model, api_key};
 }
 
 async function rescoreFiltered() {
@@ -2338,12 +2412,16 @@ function renderRowCard(rr, opts) {
       const wc = m.weight_score==null ? "muted" : "";
       const wPct = m.weight_score==null ? "—" : _pct(m.weight_score);
       const wColor = m.weight_score==null ? "var(--muted)" : _color(m.weight_score);
+      // When the LLM judge produced this match, surface its one-line reason
+      // as a tooltip on the name-match cell.
+      const reason = m.reason ? ` title="${escape(m.reason)}"` : "";
+      const judgeMark = m.reason ? ` <span class="judge-mark" title="Matched by AI judge: ${escape(m.reason)}">✨</span>` : "";
       return `<tr>
         <td class="col-truth">${escape(m.truth_name||"")}</td>
         <td class="num col-truth">${m.truth_qty==null?"—":m.truth_qty+" "+escape(m.unit||"g")}</td>
-        <td class="col-pred">${escape(m.pred_name||"")}</td>
+        <td class="col-pred">${escape(m.pred_name||"")}${judgeMark}</td>
         <td class="num col-pred">${m.pred_qty==null?"—":m.pred_qty+" "+escape(m.unit||"g")}</td>
-        <td class="num" style="color:${_color(m.name_sim)}">${_pct(m.name_sim)}</td>
+        <td class="num"${reason} style="color:${_color(m.name_sim)}">${_pct(m.name_sim)}</td>
         <td class="num ${wc}" style="color:${wColor}">${wPct}</td>
       </tr>`;
     }).join("");

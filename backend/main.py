@@ -460,14 +460,46 @@ def cancel_run(run_id: int):
     return {"ok": runner.cancel_run(run_id)}
 
 
+class RescoreIn(BaseModel):
+    version: Optional[int] = None
+    judge: bool = False
+    judge_model: Optional[str] = None
+    judge_api_key: Optional[str] = None  # optional override; falls back to env
+
+
 @app.post("/api/runs/{run_id}/rescore")
-def rescore_run(run_id: int, version: Optional[int] = None):
+def rescore_run(run_id: int,
+                version: Optional[int] = None,
+                judge: bool = False,
+                judge_model: Optional[str] = None,
+                body: Optional[RescoreIn] = None):
     """Recompute scores for an existing run against the truth at the given
     dataset version (defaults to current latest). Stored predictions are
     untouched; only the comparison against truth is redone. No provider calls.
+
+    When `judge=true` (query OR body), ingredient matching uses the LLM-as-
+    judge path (backend.llm_judge). `judge_model` overrides the default
+    (LLM_JUDGE_MODEL env var or gpt-5-mini). Pass `judge_api_key` in the
+    body if the server doesn't have one in .env. Results are cached by
+    (canonical inputs, model) so re-running is free.
     """
-    import sqlite3
+    import sqlite3, os as _os
     from .scoring import score_row, composite_score
+    # Body params override query params if provided
+    if body:
+        version = body.version if body.version is not None else version
+        judge = body.judge or judge
+        judge_model = body.judge_model or judge_model
+        if body.judge_api_key:
+            # Only set in this process while we make the LLM call. Do NOT
+            # persist into config or DB — keys are session-local.
+            _os.environ.setdefault("OPENAI_API_KEY", "")
+            if (judge_model or "").lower().startswith(("gpt", "o1", "o3", "o4")):
+                _os.environ["OPENAI_API_KEY"] = body.judge_api_key
+            elif (judge_model or "").lower().startswith("claude"):
+                _os.environ["ANTHROPIC_API_KEY"] = body.judge_api_key
+            elif (judge_model or "").lower().startswith("gemini"):
+                _os.environ["GEMINI_API_KEY"] = body.judge_api_key
     run = db.get_run(run_id)
     if not run:
         raise HTTPException(404, "Run not found")
@@ -503,7 +535,9 @@ def rescore_run(run_id: int, version: Optional[int] = None):
                 pred = _json.loads(r["output_parsed"] or "{}")
             except Exception:
                 pred = {}
-            new_scores = score_row(pred, truth_row)
+            new_scores = score_row(pred, truth_row,
+                                   use_llm_judge=judge,
+                                   judge_model=judge_model)
             old_scores = _json.loads(r["scores"] or "{}")
             old_overall = (old_scores or {}).get("overall") or 0
             new_overall = (new_scores or {}).get("overall") or 0
@@ -573,9 +607,16 @@ def rescore_run(run_id: int, version: Optional[int] = None):
 
 
 @app.post("/api/datasets/{dataset_id}/rescore_all")
-def rescore_all_runs_for_dataset(dataset_id: int):
+def rescore_all_runs_for_dataset(dataset_id: int,
+                                 judge: bool = False,
+                                 judge_model: Optional[str] = None):
     """Bulk re-score every completed run against this dataset. Use after
     saving multiple corrections to bring the leaderboard up to date.
+
+    Set `judge=true` to use the LLM-as-judge ingredient matcher
+    (backend.llm_judge). When the cache is cold this calls one LLM API
+    request per (run, row) pair; subsequent rescores hit the SQLite
+    cache and are essentially free.
 
     Runs synchronously but reports progress via /api/tasks so the user can
     see "Re-scoring 7 runs · 3/7" in the ongoing-tasks panel while it works.
@@ -584,9 +625,10 @@ def rescore_all_runs_for_dataset(dataset_id: int):
     if not runs:
         return {"rescored_runs": [], "n": 0}
     ds = db.get_dataset(dataset_id)
-    label = f"Re-scoring {len(runs)} run(s) for '{ds['name'] if ds else dataset_id}'"
+    suffix = f" (LLM-judge: {judge_model or 'default'})" if judge else ""
+    label = f"Re-scoring {len(runs)} run(s) for '{ds['name'] if ds else dataset_id}'{suffix}"
     tid = tasks.register("rescore", label, total=len(runs),
-                         meta={"dataset_id": dataset_id})
+                         meta={"dataset_id": dataset_id, "judge": judge})
     summaries = []
     try:
         for i, r in enumerate(runs):
@@ -594,7 +636,7 @@ def rescore_all_runs_for_dataset(dataset_id: int):
                 break
             tasks.update(tid, progress=i, label=f"{label} · run #{r['id']}")
             try:
-                res = rescore_run(r["id"])
+                res = rescore_run(r["id"], judge=judge, judge_model=judge_model)
                 summaries.append({"run_id": r["id"], **{k: res[k] for k in
                     ("rows_changed","accuracy_before","accuracy_after",
                      "composite_before","composite_after")}})
@@ -769,6 +811,18 @@ def hydration_status(dataset_id: int):
         else:
             needs += 1
     return {"total": len(rows), "cached": cached, "needs_hydration": needs}
+
+
+@app.get("/api/judge/status")
+def judge_status():
+    """Tell the frontend whether the LLM-judge matcher is usable
+    (a model is configured and credentials exist)."""
+    from . import llm_judge
+    return {
+        "configured": llm_judge.is_configured(),
+        "default_model": llm_judge.DEFAULT_MODEL,
+        "cache_size": llm_judge.cache_size(),
+    }
 
 
 @app.get("/api/leaderboard/{prompt_id}")

@@ -852,6 +852,18 @@ optgroup { font-style: normal; font-weight: 600; color: var(--muted); }
   white-space: pre-wrap; word-break: break-word;
 }
 
+/* AI-judge match marker — sparkle next to the predicted ingredient
+   when an LLM call decided this pairing. Hover the row to see the
+   judge's reason. */
+.judge-mark {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--copper-deep);
+  cursor: help;
+  vertical-align: super;
+}
+
 /* Live runs strip */
 #live-runs > .card {
   background: var(--paper);
