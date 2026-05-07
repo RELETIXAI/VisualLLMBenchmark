@@ -74,6 +74,12 @@ class RunIn(BaseModel):
     # locally. Avoids any S3/network image fetch during the run — useful
     # for testing or for offline evaluation on a partial hydrate.
     local_only_images: bool = False
+    # If True, the same model that produces each row's prediction is
+    # immediately reused as the LLM-as-judge ingredient matcher for that
+    # row. Inline scoring pass — no second rescore step needed. Costs
+    # one extra model-call per row but reuses the already-loaded model
+    # weights (zero load overhead).
+    judge_with_run_model: bool = False
 
 
 # ---------- meta ----------
@@ -418,6 +424,7 @@ def post_run(r: RunIn):
         user_prompt=r.user_prompt, pricing_override=r.pricing_override,
         weights=r.weights, max_rows=r.max_rows, random_sample=r.random_sample,
         local_only_images=r.local_only_images,
+        judge_with_run_model=r.judge_with_run_model,
     )
     return {"run_id": run_id}
 

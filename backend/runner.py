@@ -120,7 +120,8 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
                   image_url_template: str | None,
                   random_sample: bool,
                   dataset_id_for_corrections: int | None = None,
-                  local_only_images: bool = False) -> None:
+                  local_only_images: bool = False,
+                  judge_with_run_model: bool = False) -> None:
     controls = _get_controls(run_id)
     try:
         import random
@@ -177,7 +178,16 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
                 model_id=model_id,
                 user_prompt=user_prompt,
             )
-            scores = score_row(res.parsed, row) if not res.error else {
+            # When the user opted in, the SAME model that just produced
+            # this row's prediction is reused as the ingredient matcher.
+            # Same provider, same loaded weights — zero extra-load cost,
+            # one extra inference per row.
+            scores = score_row(
+                res.parsed, row,
+                use_llm_judge=judge_with_run_model and not res.error,
+                judge_model=model_id if judge_with_run_model else None,
+                judge_api_key=api_key if judge_with_run_model else None,
+            ) if not res.error else {
                 "food_sim": 0, "desc_sim": 0, "nutrition_per": {}, "macros_avg": 0,
                 "ingredient_f1": 0, "weight_acc": 0, "overall": 0,
                 "ingredients": {"matches": [], "unmatched_truth": [], "unmatched_pred": [],
@@ -238,7 +248,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
               weights: dict | None = None,
               max_rows: int | None = None,
               random_sample: bool = True,
-              local_only_images: bool = False) -> int:
+              local_only_images: bool = False,
+              judge_with_run_model: bool = False) -> int:
     prompt = db.get_prompt(prompt_id)
     dataset = db.get_dataset(dataset_id)
     if not prompt or not dataset:
@@ -252,7 +263,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
     config = {"user_prompt": user_prompt, "pricing_override": pricing_override,
               "weights": weights, "max_rows": max_rows, "base_url": base_url,
               "random_sample": random_sample, "pinned_version": pinned_version,
-              "api_key": api_key, "local_only_images": local_only_images}
+              "api_key": api_key, "local_only_images": local_only_images,
+              "judge_with_run_model": judge_with_run_model}
     run_id = db.create_run(prompt_id=prompt_id, dataset_id=dataset_id,
                            provider=provider_name, model_id=model_id, n_rows=n, config=config)
     # Stamp dataset_version on the run row
@@ -272,7 +284,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
                     image_url_template=dataset.get("image_url_template"),
                     random_sample=random_sample,
                     dataset_id_for_corrections=dataset["id"],
-                    local_only_images=local_only_images),
+                    local_only_images=local_only_images,
+                    judge_with_run_model=judge_with_run_model),
     )
     th.start()
     return run_id

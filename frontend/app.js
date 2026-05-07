@@ -1667,6 +1667,7 @@ async function startRun() {
   };
   body.random_sample = $("#r-randsample").checked;
   body.local_only_images = $("#r-localonly").checked;
+  body.judge_with_run_model = $("#r-judgeinline").checked;
   const pin  = parseFloat($("#r-pricein").value);
   const pout = parseFloat($("#r-priceout").value);
   if (!isNaN(pin) || !isNaN(pout)) {

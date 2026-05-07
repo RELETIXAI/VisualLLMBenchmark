@@ -203,6 +203,11 @@
             Use only locally cached images
             <span id="r-localonly-hint" class="muted small"></span>
           </label>
+          <label class="small muted" style="display:flex;align-items:center;gap:6px;margin-top:6px"
+                 title="After each row's prediction, the same model is called once more to perform semantic ingredient matching for that row. Same loaded weights, no extra model load. Adds one inference per row but skips the second-pass AI Judge step entirely.">
+            <input type="checkbox" id="r-judgeinline" style="width:auto" />
+            ✨ Use this run's model as ingredient judge
+          </label>
         </div>
         <div>
           <label class="label">Pricing override per Mtok (in / out)</label>

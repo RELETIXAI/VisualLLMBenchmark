@@ -551,13 +551,19 @@ def health_score(pred: str | None, truth: str | None) -> dict:
 
 # ----------- row-level scoring -----------
 def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
-              use_llm_judge: bool = False, judge_model: str | None = None) -> dict:
+              use_llm_judge: bool = False, judge_model: str | None = None,
+              judge_api_key: str | None = None) -> dict:
     """Returns full scoring detail used by both leaderboard and per-row UI.
 
     When `use_llm_judge=True`, the ingredient matching step uses an LLM
     judge (see backend.llm_judge) instead of the rule-based bipartite
     matcher. The scoring math (tolerance bands, weights, F1, weight_acc)
     is identical in both modes — only the matching decision changes.
+
+    `judge_model` defaults to the LLM_JUDGE_MODEL env var (gpt-5-mini).
+    `judge_api_key` overrides the env-var key for the chosen provider —
+    used by the runner to pass through this run's own api_key when the
+    user opts in to "judge with the same model".
     """
     w = {**OVERALL_WEIGHTS, **(weights or {})}
 
@@ -575,7 +581,8 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
         from . import llm_judge
         ing = llm_judge.match(pred_ings_in, truth_ings_in,
                               threshold=INGREDIENT_MATCH_THRESHOLD,
-                              model=judge_model)
+                              model=judge_model,
+                              api_key=judge_api_key)
     else:
         ing = ingredient_match(pred_ings_in, truth_ings_in)
     ing_f1 = ing["f1"]
