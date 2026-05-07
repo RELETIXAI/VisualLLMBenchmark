@@ -484,8 +484,12 @@ def rescore_run(run_id: int, version: Optional[int] = None):
 
     n_changed = 0
     affected_rows = []
-    with sqlite3.connect(db.DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+    # Use the shared connection helper so this connection inherits WAL +
+    # busy_timeout. Then disable autocommit and explicitly commit after
+    # each row instead of holding one fat transaction across the whole
+    # loop — that previous pattern blocked semantic.embed()'s separate
+    # connection trying to insert into the embeddings table.
+    with db._conn() as conn:
         rows = conn.execute(
             "SELECT * FROM row_results WHERE run_id=? ORDER BY row_idx",
             (run_id,)).fetchall()
@@ -515,16 +519,17 @@ def rescore_run(run_id: int, version: Optional[int] = None):
                 "UPDATE row_results SET scores=?, truth=?, output_parsed=? WHERE id=?",
                 (_json.dumps(new_scores), _json.dumps(new_truth_payload),
                  _json.dumps(pred), r["id"]))
+            conn.commit()  # release the write lock between rows so
+                           # semantic.embed() and the /api/tasks polls
+                           # can read freely
             if abs(new_overall - old_overall) > 1e-6:
                 n_changed += 1
                 affected_rows.append({"row_idx": r["row_idx"],
                                        "old": round(old_overall, 4),
                                        "new": round(new_overall, 4)})
-        conn.commit()
 
     # Recompute aggregate
-    with sqlite3.connect(db.DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+    with db._conn() as conn:
         rows = conn.execute(
             "SELECT * FROM row_results WHERE run_id=? ORDER BY row_idx",
             (run_id,)).fetchall()

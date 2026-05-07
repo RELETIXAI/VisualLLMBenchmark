@@ -28,7 +28,15 @@ _TEXT_ONLY_TYPES = {
 
 
 def _check_vision_capable(model_path: str) -> None:
-    """Raise ValueError immediately if the model is text-only."""
+    """Raise ValueError immediately if the model is text-only.
+
+    Detection mirrors the listing logic in backend.main: matches on either
+    a vision-related top-level key OR a known vision/multimodal
+    architecture tag. Covers LLaVA-style (image_token_index), Gemma 3/4
+    (image_token_id, vision_soft_tokens_per_image, boi_token_id, etc.),
+    Qwen2-VL (pixel_shuffle_factor), and generic *ConditionalGeneration /
+    *MultiModal architectures.
+    """
     cfg_path = os.path.join(model_path, "config.json")
     if not os.path.exists(cfg_path):
         return  # can't tell — let mlx_vlm decide
@@ -38,11 +46,19 @@ def _check_vision_capable(model_path: str) -> None:
     except Exception:
         return
     model_type = cfg.get("model_type", "")
-    is_vision = any(k in cfg for k in (
-        "vision_config", "image_token_index", "vision_model_type",
+    vision_keys = {
+        "vision_config", "vision_model_type", "vision_soft_tokens_per_image",
+        "image_token_index", "image_token_id",
         "pixel_shuffle_factor", "visual",
-    )) or any(a for a in (cfg.get("architectures") or [])
-              if "VisionLanguage" in a or "VLM" in a or "Vision" in a)
+        "boi_token_id", "eoi_token_id", "video_token_id",
+    }
+    is_vision = (
+        any(k in cfg for k in vision_keys)
+        or any(a for a in (cfg.get("architectures") or [])
+               if any(tag in a for tag in
+                      ("VisionLanguage", "VLM", "Vision",
+                       "ConditionalGeneration", "MultiModal")))
+    )
     if not is_vision and model_type in _TEXT_ONLY_TYPES:
         raise ValueError(
             f"Model '{os.path.basename(model_path)}' is text-only (type: {model_type}) "

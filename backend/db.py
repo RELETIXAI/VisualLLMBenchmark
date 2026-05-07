@@ -40,9 +40,19 @@ def hash_prompt(name: str, system_prompt: str) -> str:
 
 def _conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=30.0)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys = ON")
+    # WAL mode — concurrent readers + 1 writer without blocking each
+    # other. Critical for our pattern where a long-running rescore holds
+    # an open write transaction in one connection while score_row's
+    # semantic.embed() tries to read/write the embeddings table from a
+    # different connection. Pre-WAL this caused a cascading freeze:
+    # the embed write blocked on the rescore lock, score_row blocked on
+    # embed, rescore blocked on score_row → deadlock-like stall.
+    c.execute("PRAGMA journal_mode = WAL")
+    c.execute("PRAGMA synchronous = NORMAL")  # safe with WAL, much faster
+    c.execute("PRAGMA busy_timeout = 30000")  # wait 30 s for a busy lock
     return c
 
 
