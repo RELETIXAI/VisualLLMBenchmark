@@ -355,7 +355,15 @@ def _quantity_score(pq: float | None, tq: float | None) -> float | None:
 
 def ingredient_match(pred_list: list[dict], truth_list: list[dict],
                      threshold: float = INGREDIENT_MATCH_THRESHOLD) -> dict:
-    """Greedy bipartite match by name similarity.
+    """Global-greedy bipartite match by name similarity.
+
+    Builds the full pred×truth similarity matrix once, then iteratively
+    picks the highest-similarity unused pair until no pair clears the
+    threshold. This avoids the prior bug where truth-order-greedy
+    paired the wrong items (e.g. truth "garlic, raw" claimed pred
+    "olive oil" because "olive oil" was the highest-sim leftover at
+    that point in the loop, leaving the actual truth "olive oil" with
+    nothing to match).
 
     Returns a structured object with matches + unmatched + summary stats.
     """
@@ -377,32 +385,41 @@ def ingredient_match(pred_list: list[dict], truth_list: list[dict],
     except Exception:
         pass
 
-    # Sort truth by descending name length (most specific first) for stable matching
-    truth_order = sorted(range(len(truth_list)),
-                         key=lambda i: -len(str(truth_list[i].get("name") or "")))
+    # Build the full similarity matrix once.
+    n_p, n_t = len(pred_list), len(truth_list)
+    sim_matrix: list[list[float]] = [
+        [text_similarity(pred_list[pi].get("name"), truth_list[ti].get("name"))
+         for ti in range(n_t)]
+        for pi in range(n_p)
+    ]
 
-    for ti in truth_order:
+    # Global-greedy: enumerate all candidate pairs, sort by similarity
+    # descending, walk down the list and take the first unused pair each
+    # time. Equivalent to a 1-step approximation of the Hungarian
+    # assignment; for our well-separated similarity scores (token-equal
+    # pairs at 1.0 dominate cross-ingredient noise around 0.4–0.5) this
+    # produces the optimal pairing in practice.
+    candidates = [(sim_matrix[pi][ti], pi, ti)
+                  for pi in range(n_p) for ti in range(n_t)
+                  if sim_matrix[pi][ti] >= threshold]
+    candidates.sort(key=lambda x: -x[0])
+
+    for sim, pi, ti in candidates:
+        if pi in used_pred or ti in matched_truth:
+            continue
+        used_pred.add(pi)
+        matched_truth.add(ti)
+        p = pred_list[pi]
         t = truth_list[ti]
-        best_pi, best_sim = None, 0.0
-        for pi, p in enumerate(pred_list):
-            if pi in used_pred:
-                continue
-            sim = text_similarity(p.get("name"), t.get("name"))
-            if sim > best_sim:
-                best_sim, best_pi = sim, pi
-        if best_pi is not None and best_sim >= threshold:
-            used_pred.add(best_pi)
-            matched_truth.add(ti)
-            p = pred_list[best_pi]
-            qs = _quantity_score(p.get("quantity"), t.get("quantity"))
-            matches.append({
-                "truth_idx": ti, "pred_idx": best_pi,
-                "truth_name": t.get("name"), "pred_name": p.get("name"),
-                "truth_qty": t.get("quantity"), "pred_qty": p.get("quantity"),
-                "unit": t.get("unit") or p.get("unit") or "g",
-                "name_sim": round(best_sim, 3),
-                "weight_score": (None if qs is None else round(qs, 3)),
-            })
+        qs = _quantity_score(p.get("quantity"), t.get("quantity"))
+        matches.append({
+            "truth_idx": ti, "pred_idx": pi,
+            "truth_name": t.get("name"), "pred_name": p.get("name"),
+            "truth_qty": t.get("quantity"), "pred_qty": p.get("quantity"),
+            "unit": t.get("unit") or p.get("unit") or "g",
+            "name_sim": round(sim, 3),
+            "weight_score": (None if qs is None else round(qs, 3)),
+        })
 
     # Sort matches back by truth order for display
     matches.sort(key=lambda m: m["truth_idx"])
