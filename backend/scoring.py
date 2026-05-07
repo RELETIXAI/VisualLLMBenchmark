@@ -131,10 +131,37 @@ def _split_paren(s: str) -> tuple[str, str]:
     return outer, " ".join(inner_parts)
 
 
+def _stem(t: str) -> str:
+    """Conservative English plural stripping so 'strawberries' matches
+    'strawberry' through the token pipeline alone (without falling back
+    to the semantic-similarity floor with its quality cap).
+
+    Rules apply only when len(t) > 3 to avoid mangling short words like
+    "is", "as", "us", "bus":
+      • -ies → -y           berries → berry, strawberries → strawberry
+      • -oes → -o           tomatoes → tomato, potatoes → potato
+      • -ses → -s           losses → loss
+      • -s (not -ss / -us)  eggs → egg, beans → bean, legumes → legume
+    Words ending in -ss / -us / -is keep their final letters (avoids
+    citrus → citru, glass → glas, analysis → analysi).
+    """
+    if len(t) <= 3:
+        return t
+    if t.endswith("ies"):
+        return t[:-3] + "y"
+    if t.endswith("oes"):
+        return t[:-2]
+    if t.endswith("ses") and len(t) > 4:
+        return t[:-2]
+    if t.endswith("s") and not t.endswith(("ss", "us", "is", "os")):
+        return t[:-1]
+    return t
+
+
 def _tokens(s: str) -> set[str]:
     if not s:
         return set()
-    toks = {t for t in re.findall(r"[a-z0-9]+", str(s).lower()) if len(t) > 1}
+    toks = {_stem(t) for t in re.findall(r"[a-z0-9]+", str(s).lower()) if len(t) > 1}
     # Drop generic descriptors that don't carry food identity
     return toks - _STOP if len(toks) > 1 else toks
 
@@ -249,10 +276,15 @@ def text_similarity(pred: str | None, truth: str | None) -> float:
                 from . import semantic
                 if semantic.is_available():
                     sem = semantic.semantic_similarity(pred, truth)
-                    # Cap semantic at 0.85 of cosine — synonym matches
-                    # should never look "perfect" against an actual
-                    # equality, only "good".
-                    best = max(best, sem * 0.85)
+                    # Cap semantic at 0.92 — synonym matches should still
+                    # land in the "high but not perfect" band so token-
+                    # equality (1.0) and the strongest synonym-only match
+                    # (~0.92) stay distinguishable in the UI. Tighter
+                    # cap (0.85) was too punitive for legitimate cases
+                    # like "lettuce" ↔ "salad greens" and "tomato" ↔
+                    # "tomatoes" (the plural case is now also handled
+                    # at the tokenizer level, see _stem).
+                    best = max(best, sem * 0.92)
             except Exception:
                 pass
     return best
