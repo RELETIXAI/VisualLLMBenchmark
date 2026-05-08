@@ -17,6 +17,7 @@ share an image_id never collide.
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +25,8 @@ import httpx
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
-IMAGES_DIR = ROOT / "data" / "images"
+_DATA_DIR = Path(os.environ.get("LLMBENCH_DATA_DIR") or (ROOT / "data"))
+IMAGES_DIR = _DATA_DIR / "images"
 MAX_DIM = 1024            # longest edge after resize
 JPEG_QUALITY = 85         # quality 85 is a strong sweet spot
 HTTP_TIMEOUT = 30.0

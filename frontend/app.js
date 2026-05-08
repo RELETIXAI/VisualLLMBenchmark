@@ -489,11 +489,25 @@ function renderCompare(d) {
   const fmtPct = v => v == null ? "—" : `${(v*100).toFixed(1)}%`;
 
   // Run summary cards
+  const judgeBadge = (mode, model) => {
+    if (!mode || mode === "none") return "";
+    const cls = mode === "llm" ? "judge-llm"
+              : mode === "mixed" ? "judge-mixed"
+              : "judge-rules";
+    const tip = mode === "llm" ? `LLM-as-judge ingredient matching · model: ${model || "?"}`
+              : mode === "mixed" ? `Some rows judged by LLM (${model || "?"}), some by rule-based matcher`
+              : "Rule-based ingredient matcher (tokens + synonyms + semantic floor)";
+    const label = mode === "llm" ? `LLM judge${model ? " · " + model : ""}`
+                : mode === "mixed" ? `Mixed${model ? " · " + model : ""}`
+                : "Rules";
+    return `<span class="pill ${cls}" title="${escape(tip)}">${escape(label)}</span>`;
+  };
+
   const cards = runs.map(r => {
     const ag = r.aggregates;
     return `<div class="cmp-card">
       <div class="cmp-card-head">
-        <div><span class="pill">${escape(r.provider)}</span> <strong>${escape(r.model_id)}</strong></div>
+        <div><span class="pill">${escape(r.provider)}</span> <strong>${escape(r.model_id)}</strong> ${judgeBadge(r.judge_mode, r.judge_model)}</div>
         <div class="muted small">Run #${r.id} · ${escape(r.status)}</div>
       </div>
       <div class="cmp-stats">
@@ -2504,8 +2518,14 @@ function renderRowCard(rr, opts) {
       <td class="num col-pred" style="color:var(--copper-deep)">${u.qty==null?"—":u.qty+" "+escape(u.unit||"g")}</td>
       <td colspan="2"></td>
     </tr>`).join("");
+    const jb = ing.judged_by;
+    const jbBadge = jb === "llm"
+      ? `<span class="pill judge-llm" title="LLM-as-judge ingredient match">LLM judge</span>`
+      : jb === "rules"
+      ? `<span class="pill judge-rules" title="Rule-based ingredient matcher (tokens + synonyms + semantic floor)">Rules</span>`
+      : "";
     ingTable = `
-      <h4 class="rowcard-h">Ingredients · precision ${_pct(ing.precision||0)} · recall ${_pct(ing.recall||0)}</h4>
+      <h4 class="rowcard-h">Ingredients · precision ${_pct(ing.precision||0)} · recall ${_pct(ing.recall||0)} ${jbBadge}</h4>
       <table class="ing-table">
         <thead><tr>
           <th class="th-truth" colspan="2">▎WILLMA truth</th>
@@ -2559,7 +2579,14 @@ function renderRowCard(rr, opts) {
         <div style="flex:1;min-width:0">
           <div class="rc-names">
             <div class="rc-name"><span class="lbl-truth">truth</span> <strong>${escape(truth.food || "—")}</strong></div>
-            <div class="rc-name"><span class="lbl-pred">model</span> <span class="${(sc.name_sim||0)>=0.85?"":"rc-name-pred"}">${escape(op.food || "—")}</span></div>
+            <div class="rc-name"><span class="lbl-pred">model</span> <span class="${(sc.name_sim||0)>=0.85?"":"rc-name-pred"}">${escape(op.food || "—")}</span>
+              <span class="muted small" style="margin-left:8px">name ${_pct(sc.name_sim||0)}</span>
+              ${sc.name_judged_by === "llm"
+                ? `<span class="pill judge-llm" style="margin-left:6px" title="${escape("LLM-judged: " + (sc.name_reason || ""))}">LLM</span>`
+                : sc.name_judged_by === "rules"
+                ? `<span class="pill judge-rules" style="margin-left:6px" title="Rule-based food-name similarity (tokens + synonyms + semantic floor)">Rules</span>`
+                : ""}
+            </div>
           </div>
           <div class="muted small">row ${rr.row_idx}${modelId?` · ${escape(modelId)}`:""} · ${(rr.latency_ms/1000).toFixed(2)} s · $${cost.toFixed(4)}${rr.error?` · <span style="color:var(--red)">error</span>`:""}</div>
         </div>

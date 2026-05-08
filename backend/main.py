@@ -24,8 +24,9 @@ from .models_registry import PROVIDER_MODELS, models_for
 load_dotenv()
 
 ROOT = Path(__file__).resolve().parent.parent
-UPLOAD_DIR = ROOT / "data" / "uploads"
-IMAGES_DIR = ROOT / "data" / "images"
+_DATA_DIR = Path(os.environ.get("LLMBENCH_DATA_DIR") or (ROOT / "data"))
+UPLOAD_DIR = _DATA_DIR / "uploads"
+IMAGES_DIR = _DATA_DIR / "images"
 FRONTEND_DIR = ROOT / "frontend"
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -1179,6 +1180,53 @@ def get_run_analysis_md(run_id: int, max_rows: int = 30):
 
 
 # ---------- multi-run comparison ----------
+def _judge_provenance(run_record: dict, rows: list[dict]) -> tuple[str, str | None]:
+    """Inspect a run + its rows and return (judge_mode, judge_model).
+
+    judge_mode is one of "llm" / "rules" / "mixed" / "none" (the latter
+    if every row errored before scoring). judge_model is the actual model
+    that did the LLM ingredient matching, when discoverable:
+      • run_record.config.judge_with_run_model=True → run's own model_id
+      • otherwise → LLM_JUDGE_MODEL env or "gpt-5-mini" (the default)
+      • None when judge_mode == "rules" / "none"
+    """
+    cfg = {}
+    try:
+        cfg = _json.loads(run_record.get("config") or "{}")
+    except Exception:
+        cfg = {}
+
+    seen_llm = seen_rules = False
+    for rr in rows:
+        if rr.get("error"):
+            continue
+        sc = _safe_json(rr.get("scores"))
+        ing = sc.get("ingredients") if isinstance(sc, dict) else None
+        if not isinstance(ing, dict):
+            continue
+        jb = ing.get("judged_by")
+        if jb == "llm":
+            seen_llm = True
+        elif jb == "rules":
+            seen_rules = True
+
+    if seen_llm and seen_rules:
+        mode = "mixed"
+    elif seen_llm:
+        mode = "llm"
+    elif seen_rules:
+        mode = "rules"
+    else:
+        mode = "none"
+
+    if mode in ("rules", "none"):
+        return mode, None
+
+    if cfg.get("judge_with_run_model"):
+        return mode, f"self ({run_record.get('model_id')})"
+    return mode, os.environ.get("LLM_JUDGE_MODEL") or "gpt-5-mini"
+
+
 def _parse_id_list(s: str) -> list[int]:
     out = []
     for tok in (s or "").split(","):
@@ -1200,6 +1248,7 @@ def _build_compare(ids: list[int]) -> dict:
         full = db.get_run(r["id"]) or {}
         rows = full.get("rows", []) or []
         per_run_rows[r["id"]] = {rr["row_idx"]: rr for rr in rows}
+        judge_mode, judge_model = _judge_provenance(r, rows)
         per_run_summary.append({
             "id": r["id"],
             "status": r["status"],
@@ -1220,6 +1269,8 @@ def _build_compare(ids: list[int]) -> dict:
             "total_cost_usd": r["total_cost_usd"] or 0,
             "started_at": r["started_at"],
             "finished_at": r.get("finished_at"),
+            "judge_mode": judge_mode,
+            "judge_model": judge_model,
         })
 
     # Aggregate sub-scores per run (averaged across that run's rows)
@@ -1558,7 +1609,7 @@ async def import_preview(file: UploadFile = File(...)):
     import uuid as _uuid
 
     token   = _uuid.uuid4().hex
-    tmp_dir = ROOT / "data" / "_tmp_imports"
+    tmp_dir = _DATA_DIR / "_tmp_imports"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = tmp_dir / f"{token}.zip"
 
@@ -1584,7 +1635,7 @@ def import_apply(body: ImportApplyIn):
     """Execute the import merge for a previously previewed bundle."""
     from . import io_pack
 
-    tmp_path = ROOT / "data" / "_tmp_imports" / f"{body.import_token}.zip"
+    tmp_path = _DATA_DIR / "_tmp_imports" / f"{body.import_token}.zip"
     if not tmp_path.exists():
         raise HTTPException(404, "Import token not found or expired — please re-upload the bundle.")
 

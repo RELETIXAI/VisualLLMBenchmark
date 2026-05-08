@@ -64,10 +64,15 @@ def match(pred_list: list[dict], truth_list: list[dict],
           threshold: float = 0.40,
           model: Optional[str] = None,
           api_key: Optional[str] = None,
-          base_url: Optional[str] = None) -> dict:
-    """LLM-judge bipartite match. Same return shape as
-    backend.scoring.ingredient_match so the two are drop-in
-    interchangeable.
+          base_url: Optional[str] = None,
+          pred_food: Optional[str] = None,
+          truth_food: Optional[str] = None) -> dict:
+    """LLM-judge bipartite match for ingredients **and** food-name scoring
+    in a single call. Returned dict matches `backend.scoring.ingredient_match`
+    plus two extra fields:
+        - food_score (float | None): 0–1, how well pred_food describes
+          the same dish as truth_food. None when either side is missing.
+        - food_reason (str): short category label from the prompt rubric.
 
     base_url is honoured for OpenAI-compatible local endpoints
     (LM Studio at http://localhost:1234/v1) and Ollama
@@ -75,17 +80,24 @@ def match(pred_list: list[dict], truth_list: list[dict],
     """
     pred_list = pred_list or []
     truth_list = truth_list or []
-    if not pred_list or not truth_list:
+    pred_food = (pred_food or "").strip() or None
+    truth_food = (truth_food or "").strip() or None
+
+    # Skip the LLM call entirely when there's nothing to judge: both
+    # ingredient lists empty AND no food-name pair to compare.
+    if not pred_list and not truth_list and not (pred_food and truth_food):
         return _empty_result(pred_list, truth_list)
 
     model = model or DEFAULT_MODEL
-    cache_key = _cache_key(pred_list, truth_list, model)
+    cache_key = _cache_key(pred_list, truth_list, model,
+                           pred_food=pred_food, truth_food=truth_food)
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
     try:
-        raw = _call_judge(pred_list, truth_list, model, api_key, base_url)
+        raw = _call_judge(pred_list, truth_list, model, api_key, base_url,
+                          pred_food=pred_food, truth_food=truth_food)
         parsed = _parse_judge_output(raw, pred_list, truth_list)
     except Exception as e:
         # Friendly degrade: log the cause then fall back to the rule-based
@@ -110,50 +122,177 @@ def match(pred_list: list[dict], truth_list: list[dict],
 
 # ── prompt + parsing ──────────────────────────────────────────────────────
 
-_SYS_PROMPT = """Match ingredient lists from a food-photo benchmark. 1-to-1 bipartite assignment.
+_SYS_PROMPT = """Score a food-photo benchmark row. Two tasks in ONE response:
 
-SCORE TIERS (be decisive, don't hedge in the middle):
-- 1.00  identical name OR identical-after-removing-prep-words (cooked, raw,
-        fresh, grilled, boiled, sliced, chopped, diced, ground, etc.)
-- 0.95  translation / regional name (tahini=sesame paste,
-        mutabbal=baba ganoush, aubergine=eggplant, cilantro=coriander,
-        garbanzo=chickpea, courgette=zucchini, rocket=arugula) OR
-        plural/singular only (strawberry=strawberries)
-- 0.85  same item, cooking-state difference that *might* affect macros
-        (scrambled vs boiled egg, deep-fried vs baked) OR
-        general-name vs specific-subtype (rice vs basmati rice,
-        cheese vs cheddar) where macros are similar
+  TASK A — Score the DISH NAME match (one number, 0–1).
+  TASK B — Match the INGREDIENT LISTS, 1-to-1 bipartite assignment.
+
+==============================================================
+NO-DOUBLE-PENALTY RULE  (read this first, applies to BOTH tasks)
+==============================================================
+The benchmark scores nutrition (calories, fat, carbs, protein, fiber,
+sugar, sodium) as a SEPARATE sub-score. Any difference that ONLY shows
+up as a calorie / macro difference is already captured there.
+
+Therefore, when you score names (dish or ingredient), you MUST IGNORE
+modifiers whose entire effect is on macros. The IDENTITY of the food is
+what matters here, not its nutritional grade.
+
+MACRO-ONLY MODIFIERS — strip / ignore when comparing names:
+  • fat / dairy grade ........ skim, skimmed, whole, full-fat,
+                                low-fat, reduced-fat, fat-free,
+                                semi-skimmed, 2%, 1%
+  • grain refinement ......... brown, white, refined, wholegrain,
+                                wholewheat, whole-wheat, multigrain
+  • sweetness / salt ......... sweetened, unsweetened, salted,
+                                unsalted, no-sugar, no-salt,
+                                lightly-salted
+  • prep / cooking state ..... raw, cooked, fresh, dried, frozen,
+                                grilled, boiled, fried, baked,
+                                roasted, steamed, scrambled,
+                                poached, toasted, smoked
+  • cut / portion ............ breast, thigh, fillet, drumstick, leg,
+                                wing, whole (when applied to a meat
+                                or vegetable), chunks, ground, sliced,
+                                diced, chopped, mashed, shredded
+  • ripeness / colour ........ ripe, unripe, green, red, dark,
+                                light (when applied to a single food)
+  • origin / processing ...... organic, free-range, grass-fed,
+                                homemade, instant, natural
+
+If two names differ ONLY by these modifiers (or any combination of
+them), score them as IDENTICAL (1.00 for ingredients, 1.00 for dish
+name). Their macro consequence is captured by the nutrition sub-score
+and would otherwise be punished twice.
+
+WHAT IS *NOT* a macro-only modifier — these are real identity changes:
+  • different species / SKU ... olive oil vs vegetable oil,
+                                strawberry vs watermelon, soy milk
+                                vs cow milk, almond flour vs wheat
+                                flour, brown sugar vs white sugar
+                                are macro-only ONLY when the underlying
+                                food is the same; "soy" and "wheat"
+                                ARE different SKUs, not modifiers.
+  • different protein / cut
+    that's actually a
+    different animal ......... beef vs chicken, salmon vs tuna,
+                                pork vs lamb
+  • different fruit / veg /
+    grain entirely ........... apple vs cherry (in pies),
+                                rice vs quinoa, basmati rice vs
+                                jasmine rice (subtype, score 0.85)
+
+Rule of thumb: would a reasonable shopper buy the SAME PRODUCT FROM THE
+SAME SHELF, with only a different label sub-line? If yes → identical.
+If they'd grab a different product from a different shelf → different.
+
+==============================================================
+TASK A — DISH NAME (food_score, 0–1)
+==============================================================
+Score how well MODEL's dish name describes the SAME dish as TRUTH's name.
+Use real understanding of cuisine, not string overlap. Apply the
+no-double-penalty rule above.
+
+DISH-NAME TIERS:
+- 1.00  same dish. Differences are paraphrase / translation / word-order
+        / morphology, OR consist only of macro-only modifiers from the
+        list above.
+        e.g. "oatmeal with milk" = "oats with skimmed milk" = "oats with
+              milk" = "oats with whole milk"  (all 1.00 — fat grade is
+              captured in macros)
+        e.g. "chicken biryani" = "biryani with chicken" (word-order)
+        e.g. "aubergine moussaka" = "eggplant moussaka" (translation)
+        e.g. "grilled chicken sandwich" = "chicken sandwich" (prep word)
+- 0.85  same dish, real specifier difference that ISN'T macro-only.
+        e.g. "rice" vs "basmati rice" (subtype — basmati is a specific
+              cultivar, but the dish-name still refers to the same plate)
+        e.g. "fattoush" vs "fattoush salad" (qualifier within the same
+              cuisine)
+- 0.65  same dish family but a real content variant.
+        e.g. "chicken biryani" vs "vegetable biryani" (different protein
+              source — biryani template, different actual filling)
+        e.g. "beef shawarma" vs "chicken shawarma"
+- 0.40  same form / category but different actual food.
+        e.g. "strawberry juice" vs "watermelon juice"
+        e.g. "apple pie" vs "cherry pie"
+        e.g. "olive oil" vs "vegetable oil"
+- 0.00  different dish entirely.
+        e.g. "Greek salad" vs "Egyptian breakfast plate"
+        e.g. "pizza" vs "sushi"
+
+food_reason: ONE of these labels, optionally with a brief clarifier:
+  identical, paraphrase, translation, macros-only-modifier,
+  specifier-only, variant-mismatch, same-form-different-content,
+  different-dish.
+
+==============================================================
+TASK B — INGREDIENT MATCHING (bipartite, 1-to-1)
+==============================================================
+Apply the no-double-penalty rule first, then assign:
+
+- 1.00  same ingredient, including macro-only modifier differences:
+          milk = skim milk = whole milk = low-fat milk
+          rice = brown rice = white rice = wholegrain rice
+          chicken = chicken breast = chicken thigh = grilled chicken
+          yogurt = full-fat yogurt = unsweetened yogurt
+          bread = wholewheat bread = white bread
+- 0.95  translation / regional name / plural-singular only:
+          tahini = sesame paste, mutabbal = baba ganoush,
+          aubergine = eggplant, cilantro = coriander,
+          chickpea = garbanzo, strawberry = strawberries
+- 0.85  same ingredient family, real subtype that's NOT macro-only:
+          rice vs basmati rice (specific cultivar),
+          cheese vs cheddar (specific variety),
+          apple vs granny smith
+        (these are sub-types within the same product line, but the
+         specific subtype carries information beyond macros — variety,
+         origin, or texture — so partial credit only)
 - 0.65  composite-vs-decomposition partial: TRUTH names a single composite
         dish (sponge cake, bread bun, lasagna, cheesecake) and MODEL lists
         ONE of its main raw ingredients (flour, sugar, eggs, butter).
         Pair the composite with the most representative raw ingredient,
         leave the other raw ingredients unmatched. Same in reverse.
-- 0.50  same general food kind, real detail mismatch (chicken whole vs
-        chicken breast, beef stew vs beef chunks)
-- 0.00  different food entirely (chicken!=beef, salmon!=tuna),
-        identity-bearing variant difference (whole milk!=skim milk,
-        brown rice!=white rice), or same form / different content
-        (apple pie!=cherry pie, olive oil!=vegetable oil)
+- 0.00  different ingredient identity:
+          chicken vs beef, salmon vs tuna, olive oil vs vegetable oil,
+          strawberry vs watermelon, soy milk vs cow milk, almond flour
+          vs wheat flour, apple vs cherry.
+          Same FORM / DIFFERENT CONTENT counts as different.
 
-REASON FIELD: short category label, NOT a restatement of the names.
-Use one of: identical, translation, plural, cooking-state, general-vs-
-specific, composite-decomposition, subtype-mismatch, different-item,
-identity-conflict. Optionally append " — <one-clause clarification>".
+REASON FIELD per match: short category label, NOT a restatement of the names.
+Use one of: identical, macros-only-modifier, translation, plural,
+subtype, composite-decomposition, different-item.
+Optionally append " — <one-clause clarification>".
 
-Bad: "chicken breast vs chicken breast"
-Bad: "rice, white, cooked vs cooked rice"
-Good: "identical (prep words ignored)"
-Good: "general-vs-specific — rice covers basmati"
-Good: "composite-decomposition — flour is the main component of cake"
+Examples:
+  truth="skim milk", pred="milk"
+    → score 1.00, reason "macros-only-modifier — fat grade captured in macros"
+  truth="brown rice", pred="white rice"
+    → score 1.00, reason "macros-only-modifier — refinement captured in macros"
+  truth="basmati rice", pred="rice"
+    → score 0.85, reason "subtype — basmati is a specific cultivar"
+  truth="olive oil", pred="vegetable oil"
+    → score 0.00, reason "different-item — different oil source"
+  truth="apple", pred="cherry"
+    → score 0.00, reason "different-item — different fruit"
 
+==============================================================
+OUTPUT
+==============================================================
 Output ONLY this JSON, no prose, no markdown fences:
-{"matches":[{"truth_idx":1,"pred_idx":1,"score":0.95,"reason":"<label>"}],"unmatched_truth":[],"unmatched_pred":[]}
+{"food_score":0.85,"food_reason":"<label>","matches":[{"truth_idx":1,"pred_idx":1,"score":0.95,"reason":"<label>"}],"unmatched_truth":[],"unmatched_pred":[]}
 
-Indices are 1-based positions in the lists below."""
+Indices are 1-based positions in the lists below.
+If TRUTH or MODEL has no dish name, set food_score to null and
+food_reason to "no-name". If both ingredient lists are empty, return
+matches:[] and skip the bipartite step."""
 
 
-def _build_user_prompt(pred_list: list[dict], truth_list: list[dict]) -> str:
+def _build_user_prompt(pred_list: list[dict], truth_list: list[dict],
+                       pred_food: Optional[str] = None,
+                       truth_food: Optional[str] = None) -> str:
     def fmt(items: list[dict]) -> str:
+        if not items:
+            return "  (none)"
         out = []
         for i, x in enumerate(items, start=1):
             name = (x.get("name") or "").strip() or "?"
@@ -163,7 +302,13 @@ def _build_user_prompt(pred_list: list[dict], truth_list: list[dict]) -> str:
             out.append(f"  {i}. {name}{qty_part}")
         return "\n".join(out)
 
+    food_block = (
+        f"TRUTH DISH NAME: {truth_food or '(missing)'}\n"
+        f"MODEL DISH NAME: {pred_food or '(missing)'}\n\n"
+    )
+
     return (
+        food_block +
         f"TRUTH INGREDIENTS ({len(truth_list)}):\n{fmt(truth_list)}\n\n"
         f"MODEL INGREDIENTS ({len(pred_list)}):\n{fmt(pred_list)}\n\n"
         f"Return the JSON now."
@@ -191,8 +336,19 @@ def _parse_judge_output(text: str, pred_list, truth_list) -> dict:
         used_p.add(pi); used_t.add(ti)
         matches.append({"pi": pi, "ti": ti, "score": max(0.0, min(1.0, score)),
                         "reason": str(m.get("reason") or "")})
+
+    # Food-name score: optional, may be null when one side has no name.
+    food_score = obj.get("food_score")
+    if food_score is not None:
+        try:
+            food_score = max(0.0, min(1.0, float(food_score)))
+        except (TypeError, ValueError):
+            food_score = None
+    food_reason = str(obj.get("food_reason") or "")
+
     return {"matches": matches, "n_p": n_p, "n_t": n_t,
-            "used_p": used_p, "used_t": used_t}
+            "used_p": used_p, "used_t": used_t,
+            "food_score": food_score, "food_reason": food_reason}
 
 
 def _build_result(parsed: dict, pred_list, truth_list, threshold: float) -> dict:
@@ -246,6 +402,9 @@ def _build_result(parsed: dict, pred_list, truth_list, threshold: float) -> dict
         "precision": round(precision, 3), "recall": round(recall, 3),
         "f1": round(f1, 3), "weight_acc": round(weight_acc, 3),
         "judged_by": "llm",   # provenance flag for the UI
+        "food_score": (None if parsed.get("food_score") is None
+                       else round(parsed["food_score"], 3)),
+        "food_reason": parsed.get("food_reason") or "",
     }
 
 
@@ -261,15 +420,20 @@ def _empty_result(pred_list, truth_list) -> dict:
         "n_pred": len(pred_list), "n_truth": len(truth_list), "matched": 0,
         "precision": 0.0, "recall": 0.0, "f1": 0.0, "weight_acc": 0.0,
         "judged_by": "llm",
+        "food_score": None,
+        "food_reason": "",
     }
 
 
 # ── provider dispatch ─────────────────────────────────────────────────────
 
 def _call_judge(pred_list, truth_list, model: str, api_key: Optional[str],
-                base_url: Optional[str] = None) -> str:
+                base_url: Optional[str] = None,
+                pred_food: Optional[str] = None,
+                truth_food: Optional[str] = None) -> str:
     """One LLM call. Returns raw text response."""
-    user = _build_user_prompt(pred_list, truth_list)
+    user = _build_user_prompt(pred_list, truth_list,
+                              pred_food=pred_food, truth_food=truth_food)
     m = model.lower()
 
     # If the caller passed an explicit base_url, that's the strongest
@@ -431,11 +595,20 @@ def _canonical_for_hash(items: list[dict]) -> list[dict]:
     return out
 
 
-def _cache_key(pred_list, truth_list, model: str) -> str:
+def _cache_key(pred_list, truth_list, model: str,
+               pred_food: Optional[str] = None,
+               truth_food: Optional[str] = None) -> str:
+    def _canon_name(s: Optional[str]) -> str:
+        if not s:
+            return ""
+        return re.sub(r"\s+", " ", s.strip().lower())
+
     payload = json.dumps(
         {"m": model.lower(),
          "p": _canonical_for_hash(pred_list),
-         "t": _canonical_for_hash(truth_list)},
+         "t": _canonical_for_hash(truth_list),
+         "pf": _canon_name(pred_food),
+         "tf": _canon_name(truth_food)},
         sort_keys=True,
     )
     return hashlib.sha1(payload.encode()).hexdigest()

@@ -3,14 +3,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "benchmark.db"
-_MACHINE_ID_FILE = Path(__file__).resolve().parent.parent / "data" / "machine_id.txt"
+# Default DB lives next to the package (`<repo>/data/benchmark.db`). Can
+# be overridden with LLMBENCH_DATA_DIR — useful for running a worktree's
+# code against the main repo's data without symlinks or copies.
+_DATA_DIR = Path(os.environ.get("LLMBENCH_DATA_DIR")
+                 or (Path(__file__).resolve().parent.parent / "data"))
+DB_PATH = _DATA_DIR / "benchmark.db"
+_MACHINE_ID_FILE = _DATA_DIR / "machine_id.txt"
 
 
 def get_machine_id() -> str:

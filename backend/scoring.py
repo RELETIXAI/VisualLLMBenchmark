@@ -47,41 +47,60 @@ INGREDIENT_MATCH_THRESHOLD = 0.40   # name similarity required to count as a mat
 
 
 # ----------- text similarity -----------
-# Pure connectives (no food identity)
+# Pure connectives (no food identity) and macro-only modifiers.
+#
+# These tokens are stripped before name comparison. The principle is
+# **no double penalty**: any difference whose only effect is on macros
+# (calories, fat, fibre, sugar, salt, …) is ALREADY captured by the
+# nutrition sub-score. If the rule-based name match also penalised it,
+# the same difference would count twice.
+#
+# Examples this set lets through as 1.00 matches:
+#   • "milk" ↔ "skim milk" / "whole milk" / "full-fat milk"
+#   • "rice" ↔ "brown rice" / "white rice" / "wholegrain rice"
+#   • "chicken" ↔ "chicken breast" / "grilled chicken thigh"
+#   • "yogurt" ↔ "unsweetened yogurt" / "low-fat yogurt"
+#
+# What is NOT here (kept identity-bearing): different species or SKUs —
+# olive oil vs vegetable oil, soy milk vs cow milk, almond flour vs
+# wheat flour. Those tokens stay in the comparison and produce honest
+# disagreement.
 _STOP = {
+    # connectives
     "the", "a", "an", "of", "with", "and", "or", "in", "to",
-    # Pure preparation methods — describe HOW the ingredient was prepared,
-    # not WHAT it is. Calorie/macro impact is captured at the dish-macros
-    # level; ingredient F1 should not double-penalise prep-only differences.
+    # prep / cooking state (macro-only — how it was cooked, not what it is)
     "raw", "cooked", "fresh", "dried", "frozen", "processed",
     "homemade", "instant", "natural",
     "scrambled", "boiled", "fried", "baked", "grilled", "steamed",
+    "roasted", "poached",
     "blended", "whipped", "toasted", "mashed", "crushed",
-    "chopped", "sliced", "grated", "ground", "shredded",
+    "chopped", "sliced", "grated", "ground", "shredded", "diced",
     "peeled", "seeded", "deboned", "minced",
+    # cut / portion (macro-only — different cut of the same animal/plant)
+    "breast", "thigh", "fillet", "drumstick", "leg", "wing",
+    "chunk", "chunks", "piece", "pieces",
+    # fat / dairy grade (macro-only — fat content captured in macros)
+    "whole", "full", "skim", "skimmed", "semi", "fat", "low",
+    "reduced", "free",
+    # grain refinement (macro-only — fibre / carb captured in macros).
+    # Note: "wheat" is intentionally NOT here — it's a grain identity
+    # ("almond flour" vs "wheat flour" must stay different).
+    "brown", "white", "refined", "wholegrain", "wholewheat", "multigrain",
+    # sweetness / salt (macro-only — sugar / sodium captured in macros)
+    "sweetened", "unsweetened", "salted", "unsalted",
+    "sweet", "savoury", "savory",
+    # ripeness / colour / processing (macro-only)
+    "dark", "light", "smoked", "ripe", "unripe", "organic", "lean",
     # NOTE: flavour-prep words (spiced / seasoned / marinated / herbed /
     # flavoured) are deliberately KEPT in the comparison. They describe a
     # real difference between SKUs (shawarma-spiced chicken ≠ plain chicken)
     # even though both share the same head noun. Per user request the
     # matcher stays conservative on naming.
 }
-# DELIBERATELY NOT in _STOP — identity-bearing modifiers that change the
-# product itself (different macros, different SKU). Keeping these AND
-# enforcing a "no conflicting identity" rule below makes
-# "milk, full-fat" vs "milk, skim" stay correctly unmatched.
-_IDENTITY_MODS = {
-    # fat/dairy variants
-    "whole", "full", "skim", "fat", "low", "reduced",
-    # grain refinement
-    "brown", "white", "refined", "wholegrain", "wholewheat",
-    # sweetness / salt
-    "sweetened", "unsweetened", "salted", "unsalted",
-    "sweet", "savoury", "savory",
-    # darkness / strength
-    "dark", "light", "smoked",
-    # state of ripeness / origin specifier
-    "ripe", "unripe", "organic",
-}
+# Kept as an empty set so older code paths that still reference it don't
+# need a coordinated rewrite. The "identity-conflict" gate that used it
+# was removed when the no-double-penalty rule was introduced.
+_IDENTITY_MODS: set[str] = set()
 
 # Pairs of tokens the semantic model (all-MiniLM) confuses because of
 # shared character prefixes — they're embedded close (cosine ~0.5) but
@@ -524,6 +543,7 @@ def ingredient_match(pred_list: list[dict], truth_list: list[dict],
         "recall": round(recall, 4),
         "f1": round(f1, 4),
         "weight_acc": round(weight_acc, 4),
+        "judged_by": "rules",
     }
 
 
@@ -568,7 +588,8 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
     """
     w = {**OVERALL_WEIGHTS, **(weights or {})}
 
-    name_sim = text_similarity(pred.get("food"), truth_row.get("food"))
+    pred_food = pred.get("food")
+    truth_food = truth_row.get("food")
 
     # Macros
     nut_per = nutrient_accuracy(pred.get("nutrition") or {},
@@ -576,6 +597,8 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
     macros_avg = weighted_avg(nut_per)
 
     # Ingredients — either rule-based or LLM-as-judge.
+    # When the LLM judge is enabled, the SAME call also scores the food
+    # name (food_score in the result), avoiding a second round-trip.
     pred_ings_in = pred.get("ingredients") or []
     truth_ings_in = truth_row.get("ingredients_truth") or []
     if use_llm_judge:
@@ -584,11 +607,25 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
                               threshold=INGREDIENT_MATCH_THRESHOLD,
                               model=judge_model,
                               api_key=judge_api_key,
-                              base_url=judge_base_url)
+                              base_url=judge_base_url,
+                              pred_food=pred_food,
+                              truth_food=truth_food)
     else:
         ing = ingredient_match(pred_ings_in, truth_ings_in)
     ing_f1 = ing["f1"]
     weight_acc = ing["weight_acc"]
+
+    # Food-name similarity: prefer the LLM-judge's food_score when we ran
+    # the judge AND it returned a number. Fall back to the rule-based
+    # text_similarity() otherwise (judge off, or judge couldn't score the
+    # name — e.g. one side missing the field).
+    judge_food_score = ing.get("food_score") if use_llm_judge else None
+    if judge_food_score is not None:
+        name_sim = float(judge_food_score)
+        name_judged_by = "llm"
+    else:
+        name_sim = text_similarity(pred_food, truth_food)
+        name_judged_by = "rules"
 
     # Patch 1 — empty-list floor:
     # When the model returns no ingredients but the dish name matches well
@@ -635,6 +672,8 @@ def score_row(pred: dict, truth_row: dict, weights: dict | None = None,
         "nutrition_per": {k: v["score"] for k, v in nut_per.items()},
         # rich detail
         "name_sim": name_sim,
+        "name_judged_by": name_judged_by,
+        "name_reason": ing.get("food_reason") if name_judged_by == "llm" else "",
         "macros_avg": macros_avg,
         "nutrition_detail": nut_per,
         "ingredients": ing,
