@@ -51,11 +51,10 @@ def _conn() -> sqlite3.Connection:
     c.execute("PRAGMA foreign_keys = ON")
     # WAL mode — concurrent readers + 1 writer without blocking each
     # other. Critical for our pattern where a long-running rescore holds
-    # an open write transaction in one connection while score_row's
-    # semantic.embed() tries to read/write the embeddings table from a
-    # different connection. Pre-WAL this caused a cascading freeze:
-    # the embed write blocked on the rescore lock, score_row blocked on
-    # embed, rescore blocked on score_row → deadlock-like stall.
+    # an open write transaction in one connection while a parallel run
+    # is also writing row results from a different connection. Pre-WAL
+    # this caused a cascading freeze where each side waited on the
+    # other's lock.
     c.execute("PRAGMA journal_mode = WAL")
     c.execute("PRAGMA synchronous = NORMAL")  # safe with WAL, much faster
     c.execute("PRAGMA busy_timeout = 30000")  # wait 30 s for a busy lock

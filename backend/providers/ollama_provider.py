@@ -10,9 +10,11 @@ class OllamaProvider(BaseProvider):
     name = "ollama"
 
     def run(self, system_prompt, image_path, image_url, model_id,
-            user_prompt=None, timeout=300.0) -> ProviderResult:
+            user_prompt=None, timeout=300.0,
+            gen_params: dict | None = None) -> ProviderResult:
         user_prompt = user_prompt or DEFAULT_USER_PROMPT
         base = (self.base_url or "http://localhost:11434").rstrip("/")
+        gp = dict(gen_params or {})
 
         def _do():
             images = []
@@ -23,6 +25,16 @@ class OllamaProvider(BaseProvider):
                 b64, _mime, _raw = load_image_b64(image_path)
                 if b64:
                     images.append(b64)
+            # Ollama receives sampling params under "options". Ollama maps
+            # num_predict→max_tokens and uses snake_case for everything.
+            options: dict = {}
+            if gp.get("max_tokens"): options["num_predict"] = int(gp["max_tokens"])
+            if gp.get("temperature") is not None: options["temperature"] = float(gp["temperature"])
+            if gp.get("top_p") is not None: options["top_p"] = float(gp["top_p"])
+            if gp.get("top_k") not in (None, ""): options["top_k"] = int(gp["top_k"])
+            if gp.get("min_p") not in (None, ""): options["min_p"] = float(gp["min_p"])
+            if gp.get("repetition_penalty") not in (None, ""):
+                options["repeat_penalty"] = float(gp["repetition_penalty"])
             payload = {
                 "model": model_id,
                 "messages": [
@@ -32,6 +44,12 @@ class OllamaProvider(BaseProvider):
                 "stream": False,
                 "format": "json",
             }
+            if options:
+                payload["options"] = options
+            # Ollama supports per-request "think" toggle (0.x+) for
+            # thinking-capable models like Qwen3-VL. Default off.
+            if "enable_thinking" in gp:
+                payload["think"] = bool(gp["enable_thinking"])
             with httpx.Client(timeout=timeout) as cli:
                 resp = cli.post(f"{base}/api/chat", json=payload)
                 resp.raise_for_status()

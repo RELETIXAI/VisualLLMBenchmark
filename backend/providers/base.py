@@ -276,7 +276,13 @@ class BaseProvider:
         self.base_url = base_url
 
     def run(self, system_prompt: str, image_path: str | None, image_url: str | None,
-            model_id: str, user_prompt: str | None = None, timeout: float = 120.0) -> ProviderResult:
+            model_id: str, user_prompt: str | None = None, timeout: float = 120.0,
+            gen_params: dict | None = None) -> ProviderResult:
+        """Run inference. `gen_params` is an optional dict of generation
+        parameters (max_tokens, temperature, top_p, top_k, min_p,
+        repetition_penalty, enable_thinking, thinking_budget). Each
+        provider forwards the subset it understands and ignores the rest.
+        """
         raise NotImplementedError
 
     def _timed(self, fn):

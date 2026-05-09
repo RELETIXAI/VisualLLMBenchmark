@@ -738,11 +738,34 @@ optgroup { font-style: normal; font-weight: 600; color: var(--muted); }
 }
 .cmp-row-detail {
   padding: 14px 18px;
-  display: flex; flex-direction: column; gap: 18px;
+  /* Side-by-side per-run blocks. Each block claims at least 380px;
+     wider screens fit 2 / 3 / 4 across, narrow screens (≤ 760px) drop
+     to a single column for readability. */
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 760px) {
+  .cmp-row-detail { grid-template-columns: 1fr; }
 }
 .cmp-detail-block {
   background: var(--card); border: 1px solid var(--hairline);
   border-radius: var(--radius-2); padding: 12px 14px;
+  /* Prevent a tall ingredient list from forcing a column to be much
+     taller than its sibling — each block scrolls internally if it
+     overflows the comparison row. */
+  min-width: 0;       /* allow grid item to shrink below content size */
+}
+.cmp-detail-block .row-card-body { padding: 0; }
+.cmp-detail-block .ing-table,
+.cmp-detail-block .macro-table { font-size: 12.5px; }
+.cmp-detail-block .rowcard-grid {
+  /* The single-run drawer renders macros + ingredients in two columns
+     side by side, but inside a comparison column we want them stacked
+     so the comparison itself is the side-by-side. */
+  grid-template-columns: 1fr;
+  gap: 10px;
 }
 .cmp-detail-label {
   font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;

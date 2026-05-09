@@ -6,7 +6,7 @@ from .base import BaseProvider, ProviderResult, load_image_b64, parse_json_loose
 class OpenAIProvider(BaseProvider):
     name = "openai"
 
-    def run(self, system_prompt, image_path, image_url, model_id,
+    def run(self, system_prompt, image_path, image_url, model_id, gen_params=None,
             user_prompt=None, timeout=120.0) -> ProviderResult:
         from openai import OpenAI
         client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=timeout)

@@ -320,62 +320,14 @@ def text_similarity(pred: str | None, truth: str | None) -> float:
             if s > best:
                 best = s
 
-    # Hybrid layer — semantic floor for synonym cases the token pipeline
-    # missed (lettuce ↔ salad, beans ↔ legumes, eggplant ↔ aubergine, …).
-    #
-    # Three rules keep semantic from breaking the existing guarantees:
-    #
-    #   1. If the token pipeline already gave a confident match
-    #      (≥ INGREDIENT_MATCH_THRESHOLD), trust it. Don't let semantic
-    #      lower it.
-    #   2. If either side has an explicit identity-mod (whole/skim,
-    #      brown/white, sweetened/unsweetened) that the OTHER side
-    #      contradicts, that's a real different-SKU rejection. Semantic
-    #      cannot override it.
-    #   3. Cap the semantic contribution at 0.85 of cosine — synonym
-    #      matches should never look "perfect", they should look "good".
-    if best < INGREDIENT_MATCH_THRESHOLD:
-        p_all = sets["p_outer"] | sets["p_inner"]
-        t_all = sets["t_outer"] | sets["t_inner"]
-        shared = p_all & t_all
-        # Gate 1 — identity conflict (whole vs skim, brown vs white).
-        # Same logic as in _sim_pair, applied to the union of all
-        # tokenized forms so paren'd aliases don't sneak past it.
-        p_id = p_all & _IDENTITY_MODS
-        t_id = t_all & _IDENTITY_MODS
-        identity_conflict = (p_id and t_id and not (p_id & t_id))
-        # Gate 2 — category-token rejection.
-        # If F1 returned 0 because the only shared token is a generic
-        # category word (juice, oil, pie, sauce, …), semantic embeddings
-        # alone CANNOT decide. Strawberry juice and watermelon juice
-        # embed close (~0.63 cosine) but are different products. Honour
-        # the token pipeline's rejection.
-        category_rejection = bool(shared & _GENERIC_CATEGORY_TOKENS)
-        # Gate 3 — known semantic false friends.
-        # all-MiniLM gives chicken vs chickpea a cosine of ~0.53 even
-        # though the foods are unrelated; same for other tokens that
-        # share long character prefixes. The boost is suppressed when
-        # any false-friend pair has one token on each side.
-        false_friend = any(
-            (ff & p_all) and (ff & t_all) and not (ff & p_all & t_all)
-            for ff in _SEMANTIC_FALSE_FRIENDS
-        )
-        if not (identity_conflict or category_rejection or false_friend):
-            try:
-                from . import semantic
-                if semantic.is_available():
-                    sem = semantic.semantic_similarity(pred, truth)
-                    # Cap semantic at 0.92 — synonym matches should still
-                    # land in the "high but not perfect" band so token-
-                    # equality (1.0) and the strongest synonym-only match
-                    # (~0.92) stay distinguishable in the UI. Tighter
-                    # cap (0.85) was too punitive for legitimate cases
-                    # like "lettuce" ↔ "salad greens" and "tomato" ↔
-                    # "tomatoes" (the plural case is now also handled
-                    # at the tokenizer level, see _stem).
-                    best = max(best, sem * 0.92)
-            except Exception:
-                pass
+    # NOTE: previous versions had a semantic-embedding floor here
+    # (all-MiniLM-L6-v2 fallback for synonym cases the token pipeline
+    # missed). Removed entirely — the LLM judge handles synonyms much
+    # better than a 23M-param embedding model, and users running the
+    # rule-based path prefer pure-token honesty over a semantic model
+    # that loads ~80MB at startup and conflates similar-sounding
+    # different foods (chicken vs chickpea, salmon vs tuna). See
+    # SYNONYMS dict above for the curated rewrite list that runs first.
     return best
 
 
@@ -461,18 +413,6 @@ def ingredient_match(pred_list: list[dict], truth_list: list[dict],
     matches: list[dict] = []
     used_pred: set[int] = set()
     matched_truth: set[int] = set()
-
-    # Pre-warm the semantic cache with ALL ingredient names in this row.
-    # Embedding in a single batched call (~2ms each) is much cheaper than
-    # ~5ms × N×M pairwise calls inside text_similarity below.
-    try:
-        from . import semantic
-        if semantic.is_available():
-            names = [str(p.get("name") or "") for p in pred_list] + \
-                    [str(t.get("name") or "") for t in truth_list]
-            semantic.warmup_cache(names)
-    except Exception:
-        pass
 
     # Build the full similarity matrix once.
     n_p, n_t = len(pred_list), len(truth_list)

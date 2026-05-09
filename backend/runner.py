@@ -121,7 +121,8 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
                   random_sample: bool,
                   dataset_id_for_corrections: int | None = None,
                   local_only_images: bool = False,
-                  judge_with_run_model: bool = False) -> None:
+                  judge_with_run_model: bool = False,
+                  gen_params: dict | None = None) -> None:
     controls = _get_controls(run_id)
     try:
         import random
@@ -177,6 +178,7 @@ def _run_blocking(run_id: int, dataset_path: str, system_prompt: str,
                 image_url=None,    # Local-only — providers never fetch URLs
                 model_id=model_id,
                 user_prompt=user_prompt,
+                gen_params=gen_params,
             )
             # When the user opted in, the SAME model that just produced
             # this row's prediction is reused as the ingredient matcher.
@@ -250,7 +252,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
               max_rows: int | None = None,
               random_sample: bool = True,
               local_only_images: bool = False,
-              judge_with_run_model: bool = False) -> int:
+              judge_with_run_model: bool = False,
+              gen_params: dict | None = None) -> int:
     prompt = db.get_prompt(prompt_id)
     dataset = db.get_dataset(dataset_id)
     if not prompt or not dataset:
@@ -265,7 +268,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
               "weights": weights, "max_rows": max_rows, "base_url": base_url,
               "random_sample": random_sample, "pinned_version": pinned_version,
               "api_key": api_key, "local_only_images": local_only_images,
-              "judge_with_run_model": judge_with_run_model}
+              "judge_with_run_model": judge_with_run_model,
+              "gen_params": gen_params or {}}
     run_id = db.create_run(prompt_id=prompt_id, dataset_id=dataset_id,
                            provider=provider_name, model_id=model_id, n_rows=n, config=config)
     # Stamp dataset_version on the run row
@@ -286,7 +290,8 @@ def start_run(prompt_id: int, dataset_id: int, provider_name: str, model_id: str
                     random_sample=random_sample,
                     dataset_id_for_corrections=dataset["id"],
                     local_only_images=local_only_images,
-                    judge_with_run_model=judge_with_run_model),
+                    judge_with_run_model=judge_with_run_model,
+                    gen_params=gen_params),
     )
     th.start()
     return run_id
@@ -328,6 +333,7 @@ def retry_row(run_id: int, row_idx: int, api_key: str | None = None,
         image_url=None,    # Local-only — providers never fetch URLs
         model_id=run["model_id"],
         user_prompt=config.get("user_prompt"),
+        gen_params=config.get("gen_params"),
     )
 
     scores = score_row(res.parsed, target_row) if not res.error else {

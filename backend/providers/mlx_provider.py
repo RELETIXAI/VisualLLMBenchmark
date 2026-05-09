@@ -120,9 +120,11 @@ class MLXProvider(BaseProvider):
 
     def run(self, system_prompt: str, image_path: str | None, image_url: str | None,
             model_id: str, user_prompt: str | None = None,
-            timeout: float = 600.0) -> ProviderResult:
+            timeout: float = 600.0,
+            gen_params: dict | None = None) -> ProviderResult:
 
         user_prompt = user_prompt or DEFAULT_USER_PROMPT
+        gp = dict(gen_params or {})
 
         def _do() -> ProviderResult:
             try:
@@ -160,10 +162,22 @@ class MLXProvider(BaseProvider):
             try:
                 model, processor, config = _load_model(model_id)
 
+                # ── chat-template kwargs (controls what the *prompt*
+                # contains — e.g. Qwen3-VL inserts a thinking block here
+                # when enable_thinking=True). Default OFF so the model
+                # produces a direct JSON answer instead of a thinking
+                # monologue + answer.
+                template_kwargs: dict = {}
+                if "enable_thinking" in gp:
+                    template_kwargs["enable_thinking"] = bool(gp["enable_thinking"])
+                else:
+                    template_kwargs["enable_thinking"] = False
+
                 # Build prompt with chat template
                 prompt = apply_chat_template(
                     processor, config, user_prompt,
                     num_images=1 if img_arg else 0,
+                    **template_kwargs,
                 )
 
                 # Count approximate input tokens
@@ -173,13 +187,42 @@ class MLXProvider(BaseProvider):
                 except Exception:
                     in_tokens = (len(system_prompt) + len(user_prompt)) // 4
 
+                # ── generation kwargs (controls sampling). Forward
+                # everything mlx_vlm.generate_step understands. Unknown
+                # keys are silently dropped by the underlying call.
+                gen_kwargs: dict = {
+                    "max_tokens": int(gp.get("max_tokens") or 8192),
+                    "temperature": float(gp.get("temperature", 0.0)),
+                    "verbose": False,
+                }
+                # Optional sampler params — only include if set, so we
+                # honour mlx_vlm's defaults otherwise.
+                for src, dst, cast in [
+                    ("top_p", "top_p", float),
+                    ("top_k", "top_k", int),
+                    ("min_p", "min_p", float),
+                    ("repetition_penalty", "repetition_penalty", float),
+                    ("repetition_context_size", "repetition_context_size", int),
+                ]:
+                    if src in gp and gp[src] not in (None, ""):
+                        try:
+                            gen_kwargs[dst] = cast(gp[src])
+                        except (TypeError, ValueError):
+                            pass
+                # Thinking budget (token cap on the thinking block).
+                # Only applies when enable_thinking is True.
+                if gp.get("enable_thinking") and "thinking_budget" in gp:
+                    try:
+                        gen_kwargs["thinking_budget"] = int(gp["thinking_budget"])
+                        gen_kwargs["enable_thinking"] = True
+                    except (TypeError, ValueError):
+                        pass
+
                 output = generate(
                     model, processor,
                     image=img_arg,
                     prompt=prompt,
-                    max_tokens=8192,    # generous cap so dishes with long
-                                        # ingredient lists don't truncate
-                    verbose=False,
+                    **gen_kwargs,
                 )
 
                 text = output if isinstance(output, str) else getattr(output, "text", str(output))

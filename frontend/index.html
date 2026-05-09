@@ -217,6 +217,60 @@
           </div>
         </div>
       </div>
+
+      <!-- Generation parameters — collapsed by default. MLX honours the
+           full set; LM Studio / Ollama honour the OpenAI-compat subset
+           (max_tokens, temperature, top_p, top_k, min_p, repetition,
+           thinking). Cloud providers ignore. -->
+      <details class="gen-panel" style="margin-top:12px">
+        <summary class="muted small" style="cursor:pointer">⚙ Generation parameters (max tokens, sampling, thinking)</summary>
+        <div class="grid" style="margin-top:10px">
+          <div>
+            <label class="label">Max tokens</label>
+            <input id="r-genmax" type="number" min="1" placeholder="8192" />
+            <div class="muted small">Cap on response length. 8192 default — long ingredient lists need headroom.</div>
+          </div>
+          <div>
+            <label class="label">Temperature</label>
+            <input id="r-gentemp" type="number" step="0.05" min="0" max="2" placeholder="0.0" />
+            <div class="muted small">0 = deterministic. Bench runs benefit from low temp.</div>
+          </div>
+          <div>
+            <label class="label">Top-p (nucleus)</label>
+            <input id="r-gentopp" type="number" step="0.05" min="0" max="1" placeholder="1.0" />
+            <div class="muted small">Probability mass kept. 1 = off.</div>
+          </div>
+          <div>
+            <label class="label">Top-k</label>
+            <input id="r-gentopk" type="number" min="0" placeholder="0" />
+            <div class="muted small">0 = off. 40–100 typical when used.</div>
+          </div>
+          <div>
+            <label class="label">Min-p</label>
+            <input id="r-genminp" type="number" step="0.01" min="0" max="1" placeholder="0.0" />
+            <div class="muted small">0 = off. Tail-cut probability floor.</div>
+          </div>
+          <div>
+            <label class="label">Repetition penalty</label>
+            <input id="r-genrep" type="number" step="0.05" min="0" placeholder="1.0" />
+            <div class="muted small">1.0 = none. > 1 discourages repeats.</div>
+          </div>
+          <div>
+            <label class="label">Thinking</label>
+            <label class="small muted" style="display:flex;align-items:center;gap:6px;margin-top:6px"
+                   title="Qwen3-VL and similar models open with a thinking block when this is on. Off by default — direct answer is faster and matches our JSON contract.">
+              <input type="checkbox" id="r-genthink" style="width:auto" />
+              Enable model "thinking" block
+            </label>
+          </div>
+          <div>
+            <label class="label">Thinking budget (tokens)</label>
+            <input id="r-genthinkbudget" type="number" min="1" placeholder="(no cap)" />
+            <div class="muted small">Cap on tokens spent thinking. Only honoured when thinking is on (MLX).</div>
+          </div>
+        </div>
+      </details>
+
       <div class="row-end">
         <button class="btn" onclick="startRun()">Start benchmark</button>
       </div>

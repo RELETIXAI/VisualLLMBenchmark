@@ -331,7 +331,11 @@ async function reloadLeaderboardTable() {
         <td class="num">${fmtNum(r.total_input_tokens||0)} / ${fmtNum(r.total_output_tokens||0)}</td>
         <td class="num">$${(r.total_cost_usd||0).toFixed(4)}</td>
         <td class="num">${r.n_done}/${r.n_rows}</td>
-        <td onclick="event.stopPropagation()"><button class="link-btn" title="Delete this run" onclick="deleteRunSingle(${r.id})">delete</button></td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap">
+          <button class="link-btn" title="Re-score THIS run only with the LLM judge — opens a model picker (gpt-5-mini, claude-haiku, local LM Studio, etc.). Cached per (truth, pred), no charge for repeats." onclick="rescoreRunWithJudge(${r.id})">✨ judge</button>
+          <button class="link-btn" title="Re-score this run with the rule-based matcher (no LLM call)" onclick="rescoreRun(${r.id})">↻</button>
+          <button class="link-btn" title="Delete this run" onclick="deleteRunSingle(${r.id})">delete</button>
+        </td>
       </tr>`).join("")}
       </tbody>
     </table>
@@ -529,6 +533,21 @@ function renderCompare(d) {
         <summary class="muted small" style="cursor:pointer">View prompt</summary>
         <pre class="raw-output" style="max-height:200px">${escape(r.prompt_text||"")}</pre>
       </details>
+      ${(() => {
+        const gp = r.gen_params || {};
+        const keys = Object.keys(gp);
+        if (!keys.length) return "";
+        const fmt = (k, v) => {
+          if (v === false) return `${k}=off`;
+          if (v === true) return `${k}=on`;
+          return `${k}=${v}`;
+        };
+        const items = keys.map(k => fmt(k, gp[k])).join(" · ");
+        return `<details style="margin-top:6px">
+          <summary class="muted small" style="cursor:pointer">⚙ Gen params</summary>
+          <div class="muted small" style="font-family:var(--mono);margin-top:4px">${escape(items)}</div>
+        </details>`;
+      })()}
     </div>`;
   }).join("");
 
@@ -1682,6 +1701,23 @@ async function startRun() {
   body.random_sample = $("#r-randsample").checked;
   body.local_only_images = $("#r-localonly").checked;
   body.judge_with_run_model = $("#r-judgeinline").checked;
+
+  // Generation parameters — only include keys the user actually filled in
+  // so the backend / mlx_vlm defaults still apply when blank.
+  const gp = {};
+  const num = id => { const v = $(id).value.trim(); return v === "" ? null : parseFloat(v); };
+  const nint = id => { const v = $(id).value.trim(); return v === "" ? null : parseInt(v); };
+  if (nint("#r-genmax") !== null) gp.max_tokens = nint("#r-genmax");
+  if (num("#r-gentemp") !== null) gp.temperature = num("#r-gentemp");
+  if (num("#r-gentopp") !== null) gp.top_p = num("#r-gentopp");
+  if (nint("#r-gentopk") !== null) gp.top_k = nint("#r-gentopk");
+  if (num("#r-genminp") !== null) gp.min_p = num("#r-genminp");
+  if (num("#r-genrep") !== null) gp.repetition_penalty = num("#r-genrep");
+  gp.enable_thinking = $("#r-genthink").checked;
+  if (gp.enable_thinking && nint("#r-genthinkbudget") !== null) {
+    gp.thinking_budget = nint("#r-genthinkbudget");
+  }
+  body.gen_params = gp;
   const pin  = parseFloat($("#r-pricein").value);
   const pout = parseFloat($("#r-priceout").value);
   if (!isNaN(pin) || !isNaN(pout)) {

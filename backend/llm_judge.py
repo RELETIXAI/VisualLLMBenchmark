@@ -228,6 +228,21 @@ food_reason: ONE of these labels, optionally with a brief clarifier:
 ==============================================================
 TASK B — INGREDIENT MATCHING (bipartite, 1-to-1)
 ==============================================================
+COVERAGE RULE — read this first.
+Task B is INDEPENDENT of Task A. The dish names may disagree, be worded
+differently, or even describe different dishes — that affects food_score
+ONLY, never the ingredient matching. Evaluate every pred×truth pair on
+its own identity merit.
+
+If a pred ingredient and a truth ingredient share the same identity
+(identical or trivially equivalent names — synonyms, plurals, or names
+that differ only by macro-only modifiers), you MUST emit a match.
+Stopping early because "the dish name doesn't mention this item" is
+incorrect reasoning — that observation belongs to Task A only.
+
+Coverage is mandatory, not optional. Before leaving any truth ingredient
+unmatched, confirm that no pred ingredient is its identity equal.
+
 Apply the no-double-penalty rule first, then assign:
 
 - 1.00  same ingredient, including macro-only modifier differences:

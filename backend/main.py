@@ -81,6 +81,13 @@ class RunIn(BaseModel):
     # one extra model-call per row but reuses the already-loaded model
     # weights (zero load overhead).
     judge_with_run_model: bool = False
+    # Optional per-run generation parameters forwarded to the provider.
+    # MLX honours the full set (max_tokens, temperature, top_p, top_k,
+    # min_p, repetition_penalty, enable_thinking, thinking_budget).
+    # OpenAI-compat (LM Studio, vLLM, llama-server) honours the subset
+    # that maps onto chat.completions: max_tokens, temperature, top_p.
+    # Keys that the provider doesn't understand are ignored.
+    gen_params: Optional[dict] = None
 
 
 # ---------- meta ----------
@@ -455,6 +462,7 @@ def post_run(r: RunIn):
         weights=r.weights, max_rows=r.max_rows, random_sample=r.random_sample,
         local_only_images=r.local_only_images,
         judge_with_run_model=r.judge_with_run_model,
+        gen_params=r.gen_params,
     )
     return {"run_id": run_id}
 
@@ -555,10 +563,10 @@ def rescore_run(run_id: int,
     n_changed = 0
     affected_rows = []
     # Use the shared connection helper so this connection inherits WAL +
-    # busy_timeout. Then disable autocommit and explicitly commit after
-    # each row instead of holding one fat transaction across the whole
-    # loop — that previous pattern blocked semantic.embed()'s separate
-    # connection trying to insert into the embeddings table.
+    # busy_timeout. Commit after each row instead of holding one fat
+    # transaction across the whole loop — that previous pattern blocked
+    # parallel /api/tasks polls and the LLM judge cache table from
+    # different connections.
     with db._conn() as conn:
         rows = conn.execute(
             "SELECT * FROM row_results WHERE run_id=? ORDER BY row_idx",
@@ -592,9 +600,9 @@ def rescore_run(run_id: int,
                 "UPDATE row_results SET scores=?, truth=?, output_parsed=? WHERE id=?",
                 (_json.dumps(new_scores), _json.dumps(new_truth_payload),
                  _json.dumps(pred), r["id"]))
-            conn.commit()  # release the write lock between rows so
-                           # semantic.embed() and the /api/tasks polls
-                           # can read freely
+            conn.commit()  # release the write lock between rows so the
+                           # LLM judge cache and /api/tasks polls can
+                           # read freely
             if abs(new_overall - old_overall) > 1e-6:
                 n_changed += 1
                 affected_rows.append({"row_idx": r["row_idx"],
@@ -1249,6 +1257,10 @@ def _build_compare(ids: list[int]) -> dict:
         rows = full.get("rows", []) or []
         per_run_rows[r["id"]] = {rr["row_idx"]: rr for rr in rows}
         judge_mode, judge_model = _judge_provenance(r, rows)
+        try:
+            cfg_full = _json.loads(r.get("config") or "{}")
+        except Exception:
+            cfg_full = {}
         per_run_summary.append({
             "id": r["id"],
             "status": r["status"],
@@ -1271,6 +1283,7 @@ def _build_compare(ids: list[int]) -> dict:
             "finished_at": r.get("finished_at"),
             "judge_mode": judge_mode,
             "judge_model": judge_model,
+            "gen_params": cfg_full.get("gen_params") or {},
         })
 
     # Aggregate sub-scores per run (averaged across that run's rows)

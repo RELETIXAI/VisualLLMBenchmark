@@ -2,7 +2,7 @@
 
 Surfaces the rows where a benchmark score is suspiciously low for a
 visually-good answer, and exposes the *reasoning chain* (token sets,
-synonyms, semantic cosine, which gate fired) that produced the number.
+synonyms, tokens, which gate fired) that produced the number.
 Use this to decide *what* to change about scoring, not just *that* it
 needs changing.
 
@@ -76,24 +76,10 @@ def _judge_provenance(run: dict, rows: list[dict]) -> tuple[str, str | None]:
     return mode, os.environ.get("LLM_JUDGE_MODEL") or "gpt-5-mini"
 
 
-def _semantic_cosine(a: str | None, b: str | None) -> float | None:
-    """Return the raw cosine if the semantic backend is available, else None."""
-    if not a or not b:
-        return None
-    try:
-        from backend import semantic
-        if not semantic.is_available():
-            return None
-        return float(semantic.semantic_similarity(a, b))
-    except Exception:
-        return None
-
-
 def _name_trace(pred: str | None, truth: str | None) -> dict:
     """Recompute the reasoning chain that text_similarity() walked.
-    Returns the inputs after synonym rewrite, the token sets, the F1,
-    semantic cosine, and which (if any) gates would have fired in
-    the semantic-floor branch."""
+    Returns the inputs after synonym rewrite, the token sets, F1, and
+    which (if any) rejection gates fired."""
     if not pred or not truth:
         return {"pred": pred, "truth": truth, "name_sim": 0.0, "note": "empty input"}
 
@@ -114,22 +100,16 @@ def _name_trace(pred: str | None, truth: str | None) -> dict:
             if s > best_pair[2]:
                 best_pair = (pk, tk, s)
 
-    # Gates the semantic-floor branch checks
     p_all = sets["p_outer"] | sets["p_inner"]
     t_all = sets["t_outer"] | sets["t_inner"]
     shared = p_all & t_all
-    p_id = p_all & scoring._IDENTITY_MODS
-    t_id = t_all & scoring._IDENTITY_MODS
-    identity_conflict = bool(p_id and t_id and not (p_id & t_id))
     category_rejection = bool(shared & scoring._GENERIC_CATEGORY_TOKENS)
     false_friend = any(
         (ff & p_all) and (ff & t_all) and not (ff & p_all & t_all)
         for ff in scoring._SEMANTIC_FALSE_FRIENDS
     )
 
-    # Authoritative score from the function under test
     actual = scoring.text_similarity(pred, truth)
-    cosine = _semantic_cosine(pred, truth)
 
     return {
         "pred": pred,
@@ -141,9 +121,7 @@ def _name_trace(pred: str | None, truth: str | None) -> dict:
         "shared_tokens": sorted(shared),
         "best_pair_F1": round(best_pair[2], 3),
         "best_pair_keys": (best_pair[0], best_pair[1]),
-        "semantic_cosine": (None if cosine is None else round(cosine, 3)),
         "name_sim": round(actual, 3),
-        "gate_identity_conflict": identity_conflict,
         "gate_category_rejection": category_rejection,
         "gate_false_friend": false_friend,
     }
@@ -220,7 +198,6 @@ def _section_name_outliers(run: dict, rows: list[dict], top: int) -> str:
     for rr, sc, truth, op, pred_food, truth_food, ns, f1 in candidates:
         trace = _name_trace(pred_food, truth_food)
         gates = []
-        if trace["gate_identity_conflict"]: gates.append("identity_conflict")
         if trace["gate_category_rejection"]: gates.append("category_rejection")
         if trace["gate_false_friend"]: gates.append("false_friend")
         gates_s = (", ".join(gates) or "none fired")
@@ -238,7 +215,6 @@ def _section_name_outliers(run: dict, rows: list[dict], top: int) -> str:
             f"| truth tokens | `{trace['tokens_truth']}` |\n"
             f"| shared tokens | `{trace['shared_tokens']}` |\n"
             f"| best F1 (token pipeline) | {trace['best_pair_F1']:.3f} (pair `{trace['best_pair_keys']}`) |\n"
-            f"| semantic cosine | `{trace['semantic_cosine']}` |\n"
             f"| gates fired | `{gates_s}` |\n"
             f"| pred after synonyms | `{trace['pred_after_synonyms']}` |\n"
             f"| truth after synonyms | `{trace['truth_after_synonyms']}` |\n\n"
@@ -371,7 +347,7 @@ def main() -> int:
     out.append(f"This report surfaces (a) the active judge configuration per run, "
                f"(b) rows where `name_sim` looks unfairly low, and (c) the largest "
                f"score disagreements across runs. The reasoning chain (synonyms, "
-               f"tokens, semantic cosine, gates) is included so you can decide "
+               f"tokens, gates) is included so you can decide "
                f"*why* a row scored where it did.\n\n")
 
     # Per-run sections

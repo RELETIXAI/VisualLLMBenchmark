@@ -6,7 +6,7 @@ from .base import BaseProvider, ProviderResult, load_image_b64, parse_json_loose
 class GeminiProvider(BaseProvider):
     name = "gemini"
 
-    def run(self, system_prompt, image_path, image_url, model_id,
+    def run(self, system_prompt, image_path, image_url, model_id, gen_params=None,
             user_prompt=None, timeout=120.0) -> ProviderResult:
         from google import genai
         from google.genai import types
