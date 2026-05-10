@@ -203,7 +203,8 @@ def _normalize_ingredient(item: dict) -> dict | None:
     name = item.get("name") or item.get("ingredient") or item.get("item")
     if not name:
         return None
-    qty = _grab_number(item.get("quantity") or item.get("qty") or item.get("amount") or item.get("weight"))
+    qty = _grab_number(item.get("quantity") or item.get("qty") or item.get("amount")
+                       or item.get("weight") or item.get("grams"))  # fine-tuned model uses "grams"
     unit = str(item.get("unit") or item.get("units") or "g").strip()
     out = {"name": str(name).strip(), "quantity": qty, "unit": unit}
     # Per-ingredient nutrition (optional)
@@ -226,7 +227,10 @@ def normalize_prediction(parsed: dict) -> dict:
         if k in parsed and parsed[k]:
             out["description"] = str(parsed[k])
             break
-    out["nutrition"] = _normalize_nutrition(parsed.get("nutrition") or parsed.get("nutrients") or {})
+    out["nutrition"] = _normalize_nutrition(
+        parsed.get("nutrition") or parsed.get("nutrients")
+        or parsed.get("macros") or {}          # fine-tuned model uses "macros"
+    )
     ings = parsed.get("ingredients") or parsed.get("components") or []
     if isinstance(ings, list):
         for it in ings:

@@ -232,15 +232,31 @@ def _apply_corrections(rows: list[dict], dataset_id: int | None,
         return 0
     import json as _json
 
+    import re as _re
+
+    def _norm_image_id(raw: str) -> str:
+        """Normalise to a bare image id.
+
+        Corrections may be stored as  '6/1234-uuid.jpg'  (dataset_id prefix +
+        extension) while parsed rows carry only the bare id  '1234-uuid'.
+        Strip both so lookups always match.
+        """
+        s = str(raw).strip()
+        # Strip leading  "<digits>/"  prefix  (e.g. "6/")
+        s = _re.sub(r"^\d+/", "", s)
+        # Strip trailing image extension
+        s = _re.sub(r"\.(jpe?g|png|webp|gif|bmp)$", "", s, flags=_re.IGNORECASE)
+        return s
+
     if at_version is None:
         # Build state from current corrections in one shot
         items = db.list_corrections(dataset_id)
         state = {}
-        meta = {}   # image_id -> (last_version, change_count)
+        meta = {}   # bare_image_id -> (last_version, change_count)
         # Pull change counts from history for the meta sidebar
         for c in items:
             try:
-                state[c["image_id"]] = _json.loads(c.get("truth_json") or "{}")
+                state[_norm_image_id(c["image_id"])] = _json.loads(c.get("truth_json") or "{}")
             except Exception:
                 continue
         # Lightweight per-image meta — query history once
@@ -252,23 +268,23 @@ def _apply_corrections(rows: list[dict], dataset_id: int | None,
                     GROUP BY image_id
                 """, (dataset_id,)).fetchall()
                 for h in rows_h:
-                    meta[h["image_id"]] = (h["v"], h["n"])
+                    meta[_norm_image_id(h["image_id"])] = (h["v"], h["n"])
         except Exception:
             pass
     else:
-        state = db.replay_history(dataset_id, at_version)
+        state = {_norm_image_id(k): v for k, v in db.replay_history(dataset_id, at_version).items()}
         meta = {}
 
     n = 0
     for row in rows:
-        img_id = row.get("image_id") or row.get("image_path")
+        img_id = _norm_image_id(row.get("image_id") or row.get("image_path") or "")
         if not img_id:
             continue
-        payload = state.get(str(img_id))
+        payload = state.get(img_id)
         if not payload:
             continue
         _apply_truth_payload(row, payload)
-        m = meta.get(str(img_id))
+        m = meta.get(img_id)
         row["_correction"] = {
             "is_corrected": True,
             "version_when_changed": m[0] if m else None,

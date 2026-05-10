@@ -63,10 +63,20 @@ def _resize_and_save(raw: bytes, dest: Path) -> dict:
 def fetch_and_cache(dataset_id: int, image_id: str, image_url: str,
                     client: Optional[httpx.Client] = None) -> Path:
     """Idempotent: download → resize → save. Returns local path. Raises
-    on network/decode error."""
+    on network/decode error.
+
+    When LLMBENCH_IMAGES_ONLY_LOCAL=1, this raises if the image is not
+    already on disk — fine-tuning workflows must never silently pull
+    from S3/HTTP and accidentally include a holdout image."""
     dest = cache_path(dataset_id, image_id)
     if dest.exists():
         return dest
+    if os.environ.get("LLMBENCH_IMAGES_ONLY_LOCAL", "0") == "1":
+        raise RuntimeError(
+            f"LLMBENCH_IMAGES_ONLY_LOCAL=1 but image not hydrated: "
+            f"dataset_id={dataset_id} image_id={image_id!r} url={image_url!r}. "
+            f"Hydrate first or unset the env var."
+        )
     own_client = client is None
     cli = client or httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True)
     try:

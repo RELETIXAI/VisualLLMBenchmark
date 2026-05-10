@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, image_cache, runner, tasks
+from . import db, image_cache, runner, tasks, training as tr
 from .parser import parse_dataset
 from .pricing import PRICING
 from .providers import PROVIDERS
@@ -88,6 +88,11 @@ class RunIn(BaseModel):
     # that maps onto chat.completions: max_tokens, temperature, top_p.
     # Keys that the provider doesn't understand are ignored.
     gen_params: Optional[dict] = None
+    # Optional path to a LoRA adapter directory (data/adapters/<id>-<name>)
+    # produced by a training_jobs row. Only the MLX provider currently
+    # honours it — other providers ignore. Forwarded via gen_params so
+    # we don't need a new arg on every provider's run() signature.
+    adapter_path: Optional[str] = None
 
 
 # ---------- meta ----------
@@ -166,6 +171,11 @@ def models(provider: str, base_url: Optional[str] = None):
         import glob as _glob, json as _json, os as _os
         search_roots = [
             _os.path.expanduser("~/AI/models/mlx"),
+            # bf16 HuggingFace sources — mlx_vlm.load() can run them
+            # directly (it casts to MLX float at load time). Also the
+            # natural target when running a freshly-trained LoRA adapter,
+            # since the adapter was learned against the bf16 base.
+            _os.path.expanduser("~/AI/models/source"),
             _os.path.expanduser("~/.cache/huggingface/hub"),
             _os.path.expanduser("~/.lmstudio/models"),
         ]
@@ -454,6 +464,12 @@ def post_run(r: RunIn):
             api_key = os.getenv("ANTHROPIC_API_KEY")
         elif r.provider.lower() in ("gemini", "google"):
             api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    # Plumb adapter_path through gen_params so MLXProvider can pick it
+    # up without changing the BaseProvider signature. Also persist on
+    # the run row (denormalised) so /api/runs queries can filter by it.
+    gp = dict(r.gen_params or {})
+    if r.adapter_path:
+        gp["adapter_path"] = r.adapter_path
     run_id = runner.start_run(
         prompt_id=r.prompt_id, dataset_id=r.dataset_id,
         provider_name=r.provider, model_id=r.model_id,
@@ -462,8 +478,13 @@ def post_run(r: RunIn):
         weights=r.weights, max_rows=r.max_rows, random_sample=r.random_sample,
         local_only_images=r.local_only_images,
         judge_with_run_model=r.judge_with_run_model,
-        gen_params=r.gen_params,
+        gen_params=gp or None,
     )
+    if r.adapter_path:
+        try:
+            db.update_run(run_id, adapter_path=r.adapter_path)
+        except Exception:
+            pass
     return {"run_id": run_id}
 
 
@@ -1692,6 +1713,95 @@ def index():
 @app.get("/version")
 def version():
     return {"build": _build_version()}
+
+
+# ---------- training (Phase 3 — fine-tuning) ----------
+
+class TrainingJobIn(BaseModel):
+    base_model: str
+    dataset_dir: str = "data/sft"
+    config: Optional[dict] = None
+
+
+@app.get("/api/training/models")
+def training_list_models():
+    """Local models registered as training bases, plus availability flag."""
+    return {"models": tr.list_models()}
+
+
+@app.get("/api/training/adapters")
+def training_list_adapters():
+    """Existing adapter directories under data/adapters/ — what the
+    benchmark's adapter dropdown should offer."""
+    return {"adapters": tr.list_adapters()}
+
+
+@app.get("/api/training/jobs")
+def training_list_jobs():
+    tr.reap_finished()
+    return {"jobs": tr.list_jobs()}
+
+
+@app.post("/api/training/jobs")
+def training_create_job(payload: TrainingJobIn):
+    try:
+        job_id = tr.create_job(payload.base_model, payload.dataset_dir,
+                               payload.config or {})
+        pid = tr.start_job(job_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"{type(e).__name__}: {e}")
+    return {"id": job_id, "pid": pid}
+
+
+@app.get("/api/training/jobs/{job_id}")
+def training_get_job(job_id: int):
+    tr.reap_finished()
+    j = tr.get_job(job_id)
+    if not j:
+        raise HTTPException(404, "training job not found")
+    j["log_tail"] = tr.tail_log(job_id, 200)
+    # Expose total_iters from config_json so UI can render progress bar
+    try:
+        cfg = _json.loads(j.get("config_json") or "{}")
+        j["total_iters"] = int(cfg.get("iters", 0))
+    except Exception:
+        j["total_iters"] = 0
+    # Expose adapter dir size and paused step
+    j["adapter_size_mb"] = tr.adapter_size_mb(j.get("adapter_path"))
+    j["paused_at_step"]  = j.get("paused_at_step") or 0
+    return j
+
+
+@app.get("/api/training/jobs/{job_id}/metrics")
+def training_get_metrics(job_id: int, since: int = 0):
+    return {"metrics": tr.read_metrics(job_id, since)}
+
+
+@app.post("/api/training/jobs/{job_id}/cancel")
+def training_cancel_job(job_id: int):
+    if not tr.cancel_job(job_id):
+        raise HTTPException(409, "job is not running or paused")
+    return {"ok": True}
+
+
+@app.post("/api/training/jobs/{job_id}/pause")
+def training_pause_job(job_id: int):
+    try:
+        step = tr.pause_job(job_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, "paused_at_step": step}
+
+
+@app.post("/api/training/jobs/{job_id}/resume")
+def training_resume_job(job_id: int):
+    try:
+        pid = tr.resume_job(job_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, "pid": pid}
 
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")

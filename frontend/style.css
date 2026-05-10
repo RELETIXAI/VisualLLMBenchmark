@@ -1317,3 +1317,20 @@ optgroup { font-style: normal; font-weight: 600; color: var(--muted); }
   color: #2a6a2a; font-weight: 600;
 }
 [data-theme="dark"] .ip-success { color: #7fcc7f; }
+
+/* Hydration progress badge in dataset cards.
+   Polled from /api/datasets/{id}/hydration_status by mountHydrationBadges()
+   in app.js. Surfaces both API-triggered hydrates and standalone scripts
+   (scripts/hydrate.py) — anything that writes to data/images/{ds_id}/. */
+.ds-hydra { margin-top: 8px; }
+.ds-hydra:empty { display: none; }   /* don't take vertical space when idle */
+.ds-hydra-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ds-hydra-bar {
+  margin-top: 6px; height: 4px; width: 100%;
+  background: var(--paper-2); border-radius: 2px; overflow: hidden;
+  border: 1px solid var(--hairline);
+}
+.ds-hydra-bar-fill {
+  height: 100%; background: var(--copper);
+  transition: width 0.4s ease-out;
+}

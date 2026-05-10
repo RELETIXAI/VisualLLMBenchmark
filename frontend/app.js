@@ -176,6 +176,7 @@ function switchTab(name) {
   if (name === "prompts")     refreshPrompts();
   if (name === "runs")        refreshRuns();
   if (name === "benchmark")   refreshBenchmarkForm();
+  if (name === "train")       trainRefreshAll();
 }
 
 // ----- toast -----
@@ -926,10 +927,101 @@ async function refreshDatasets() {
           </div>
         </div>
         ${versionStrip}
+        <div id="ds-hydra-${d.id}" class="ds-hydra"></div>
         <div id="ds-view-${d.id}"></div>
       </div>
     `;
   }).join("");
+  mountHydrationBadges(CACHE.datasets);
+}
+
+// ─── Hydration progress badges (works for any source: API, standalone script, etc.) ───
+// Polls /api/datasets/{id}/hydration_status every 5 s for each dataset card. Stops
+// when needs_hydration reaches 0. Survives standalone hydrators (scripts/hydrate.py)
+// because the endpoint counts files on disk, not in-process tasks.
+const HYDRA_POLLERS = {};   // dsId -> intervalId
+const HYDRA_HISTORY = {};   // dsId -> [{t, cached}, ...]  for ETA estimation
+
+function mountHydrationBadges(datasets) {
+  // Stop any pollers for cards that no longer exist
+  for (const id of Object.keys(HYDRA_POLLERS)) {
+    if (!datasets.find(d => String(d.id) === id)) {
+      clearInterval(HYDRA_POLLERS[id]);
+      delete HYDRA_POLLERS[id];
+      delete HYDRA_HISTORY[id];
+    }
+  }
+  for (const d of datasets) {
+    // Always re-fetch immediately so the badge appears fast on first render,
+    // then poll every 5 s.
+    if (HYDRA_POLLERS[d.id]) clearInterval(HYDRA_POLLERS[d.id]);
+    pollHydration(d.id);
+    HYDRA_POLLERS[d.id] = setInterval(() => pollHydration(d.id), 5000);
+  }
+}
+
+async function pollHydration(dsId) {
+  const el = document.getElementById(`ds-hydra-${dsId}`);
+  if (!el) {
+    // Card unmounted — stop polling
+    if (HYDRA_POLLERS[dsId]) {
+      clearInterval(HYDRA_POLLERS[dsId]);
+      delete HYDRA_POLLERS[dsId];
+    }
+    return;
+  }
+  let s;
+  try {
+    s = await api.hydrationStatus(dsId);
+  } catch {
+    return; // transient — try again next tick
+  }
+  const total = s.total || 0;
+  const cached = s.cached || 0;
+  const need = s.needs_hydration || 0;
+
+  if (total === 0) { el.innerHTML = ""; return; }
+
+  // Track samples for rate / ETA (keep last ~6, ie ~30 s of history)
+  const hist = HYDRA_HISTORY[dsId] = HYDRA_HISTORY[dsId] || [];
+  hist.push({ t: Date.now() / 1000, cached });
+  while (hist.length > 6) hist.shift();
+
+  if (need === 0) {
+    el.innerHTML = `<span class="pill ok">✓ all ${total.toLocaleString()} images cached</span>`;
+    // Stop polling — done
+    if (HYDRA_POLLERS[dsId]) {
+      clearInterval(HYDRA_POLLERS[dsId]);
+      delete HYDRA_POLLERS[dsId];
+    }
+    return;
+  }
+
+  // Rate from oldest sample to newest
+  let etaTxt = "";
+  if (hist.length >= 2) {
+    const first = hist[0], last = hist[hist.length - 1];
+    const dt = last.t - first.t;
+    const dn = last.cached - first.cached;
+    if (dt > 0 && dn > 0) {
+      const rate = dn / dt;            // images / second
+      const etaSec = need / rate;
+      const etaMin = etaSec / 60;
+      etaTxt = etaMin >= 60
+        ? `~${(etaMin / 60).toFixed(1)} h remaining @ ${rate.toFixed(1)}/s`
+        : `~${Math.ceil(etaMin)} min remaining @ ${rate.toFixed(1)}/s`;
+    } else if (dn === 0 && dt > 10) {
+      etaTxt = `<span class="muted small">no progress in last ${Math.round(dt)} s</span>`;
+    }
+  }
+  const pct = total > 0 ? (cached / total) * 100 : 0;
+  el.innerHTML = `
+    <div class="ds-hydra-row">
+      <span class="pill run">⟳ hydrating · ${cached.toLocaleString()} / ${total.toLocaleString()} (${pct.toFixed(1)}%)</span>
+      <span class="muted small">${etaTxt}</span>
+    </div>
+    <div class="ds-hydra-bar"><div class="ds-hydra-bar-fill" style="width:${pct.toFixed(2)}%"></div></div>
+  `;
 }
 
 async function applyTpl(id, template) {
@@ -1530,7 +1622,9 @@ async function refreshBenchmarkForm() {
   $("#r-provider").onchange = onProviderChange;
   $("#r-dataset").onchange = onDatasetChange;
   $("#r-localonly").onchange = onDatasetChange;
-  $("#refresh-models").onclick = (e) => { e.preventDefault(); fetchModels(); };
+  $("#refresh-models").onclick   = (e) => { e.preventDefault(); fetchModels(); };
+  const ra = $("#refresh-adapters");
+  if (ra) ra.onclick = (e) => { e.preventDefault(); loadAdapterOptions(); };
   onDatasetChange();
 }
 
@@ -1567,6 +1661,10 @@ async function onProviderChange() {
   const local = needsBaseUrl || prov === "mlx";
   $("#apikey-block").classList.toggle("hidden", local);
   $("#baseurl-block").classList.toggle("hidden", !needsBaseUrl);
+  // Adapter selector only makes sense for MLX (LoRA weights on Apple Silicon)
+  const adapterBlock = $("#adapter-block");
+  if (adapterBlock) adapterBlock.classList.toggle("hidden", prov !== "mlx");
+  if (prov === "mlx") loadAdapterOptions();
   // Always reset base_url on provider switch so a leftover localhost
   // URL doesn't get sent to a cloud SDK (causes "404 page not found").
   $("#r-baseurl").value = "";
@@ -1589,6 +1687,28 @@ async function onProviderChange() {
       : `Paste your <strong>${info.name}</strong> key (<code>${info.envvar}</code>). It's used only for this run and never stored.${info.keys_url?` <a href="${info.keys_url}" target="_blank" rel="noopener">Get a key →</a>`:""}`;
   }
   fetchModels();
+}
+
+async function loadAdapterOptions() {
+  const sel = $("#r-adapter-select");
+  if (!sel) return;
+  try {
+    const { adapters } = await _trainFetch("/api/training/adapters");
+    sel.innerHTML = `<option value="">None — base model only</option>` +
+      adapters.map(a => {
+        const iters  = a.iters  ? ` · ${a.iters.toLocaleString()} iters` : "";
+        const base   = a.base_model ? ` · ${a.base_model.split("/").pop()}` : "";
+        const label  = `${a.name}${base}${iters}`;
+        return `<option value="${_esc(a.path)}" title="${_esc(a.path)}">${_esc(label)}</option>`;
+      }).join("");
+    // Auto-select if only one adapter exists
+    if (adapters.length === 1) sel.selectedIndex = 1;
+    const hint = $("#r-adapter-hint");
+    if (hint && adapters.length === 0)
+      hint.textContent = "No adapters found yet. Train a model first.";
+  } catch (e) {
+    if (sel) sel.innerHTML = `<option value="">— could not load adapters —</option>`;
+  }
 }
 
 async function fetchModels() {
@@ -1701,6 +1821,9 @@ async function startRun() {
   body.random_sample = $("#r-randsample").checked;
   body.local_only_images = $("#r-localonly").checked;
   body.judge_with_run_model = $("#r-judgeinline").checked;
+  // LoRA adapter (MLX only) — empty string means "base model, no adapter"
+  const adapterSel = $("#r-adapter-select");
+  if (adapterSel && adapterSel.value) body.adapter_path = adapterSel.value;
 
   // Generation parameters — only include keys the user actually filled in
   // so the backend / mlx_vlm defaults still apply when blank.
@@ -3022,3 +3145,421 @@ function startTasksPolling() {
 
 bootstrap();
 startTasksPolling();
+
+
+// ============================================================================
+// TRAIN TAB
+// ============================================================================
+//
+// Talks to the /api/training/* endpoints in backend/main.py:
+//   GET  /api/training/models        — populate the base-model select
+//   GET  /api/training/jobs          — history list + reaper trigger
+//   POST /api/training/jobs          — create + start a job
+//   GET  /api/training/jobs/{id}     — single job (with log_tail)
+//   GET  /api/training/jobs/{id}/metrics?since=<step>
+//   POST /api/training/jobs/{id}/cancel
+//
+// Polling: while a job is `running`, poll the per-job endpoint every 3 s.
+// The reaper inside reap_finished() flips status when the pid dies, so the
+// UI sees `completed`/`failed` on the next tick.
+// ============================================================================
+
+const TRAIN = {
+  pollers: {},          // job_id → setTimeout handle
+  lastStep: {},         // job_id → max metric step seen
+  metrics:  {},         // job_id → array of metric dicts (loss curve buffer)
+};
+
+function _esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+async function _trainFetch(path, opts) {
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = { detail: text }; }
+  if (!r.ok) throw new Error(body.detail || text || `HTTP ${r.status}`);
+  return body;
+}
+
+async function trainRefreshAll() {
+  await Promise.all([trainLoadModels(), trainRefreshJobs()]);
+}
+
+async function trainLoadModels() {
+  try {
+    const { models } = await _trainFetch("/api/training/models");
+    const sel = document.getElementById("train-base");
+    if (!sel) return;
+    sel.innerHTML = models.map(m => {
+      const dis = m.available ? "" : " disabled";
+      const tag = m.available ? "" : " — not on disk";
+      return `<option value="${_esc(m.path)}"${dis}>${_esc(m.label)}${tag}</option>`;
+    }).join("");
+  } catch (e) {
+    toast(`Could not load training models: ${e.message}`, "error");
+  }
+}
+
+async function trainStartJob() {
+  const baseSel = document.getElementById("train-base");
+  if (!baseSel || !baseSel.value) {
+    toast("Pick an available base model first.", "error");
+    return;
+  }
+  const body = {
+    base_model: baseSel.value,
+    dataset_dir: document.getElementById("train-data").value.trim() || "data/sft",
+    config: {
+      lora_rank:             +document.getElementById("train-rank").value,
+      lr:                    +document.getElementById("train-lr").value,
+      iters:                 +document.getElementById("train-iters").value,
+      batch_size:            +document.getElementById("train-batch").value,
+      save_every:            +document.getElementById("train-save").value,
+      seq_len:               +document.getElementById("train-seq").value,
+      grad_checkpoint:       document.getElementById("train-grad-ckpt").checked,
+      freeze_vision:         document.getElementById("train-freeze-vision").checked,
+      freeze_routed_experts: document.getElementById("train-freeze-experts").checked,
+    },
+  };
+  try {
+    const res = await _trainFetch("/api/training/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    toast(`Training job #${res.id} started (pid ${res.pid})`);
+    trainPollJob(res.id);
+    trainRefreshJobs();
+  } catch (e) {
+    toast(`Could not start training: ${e.message}`, "error");
+  }
+}
+
+function trainPollJob(id) {
+  if (TRAIN.pollers[id]) clearTimeout(TRAIN.pollers[id]);
+  const tick = async () => {
+    try {
+      const job = await _trainFetch(`/api/training/jobs/${id}`);
+      const since = TRAIN.lastStep[id] || 0;
+      const { metrics } = await _trainFetch(`/api/training/jobs/${id}/metrics?since=${since}`);
+      if (metrics.length) {
+        TRAIN.lastStep[id] = metrics[metrics.length - 1].step || since;
+        TRAIN.metrics[id] = (TRAIN.metrics[id] || []).concat(metrics);
+      }
+      trainRenderActive(job, TRAIN.metrics[id] || []);
+      if (job.status === "running" || job.status === "queued") {
+        TRAIN.pollers[id] = setTimeout(tick, 3000);
+      } else if (job.status === "paused") {
+        // Paused — stop active polling, but leave the card rendered.
+        if (TRAIN.pollers[id]) { clearTimeout(TRAIN.pollers[id]); delete TRAIN.pollers[id]; }
+        trainRefreshJobs();
+      } else {
+        // Terminal state — final refresh so history list shows the status.
+        trainRefreshJobs();
+      }
+    } catch (e) {
+      const el = document.getElementById("train-active");
+      if (el) el.innerHTML = `<div class="card"><p class="muted">Lost contact with job #${id}: ${_esc(e.message)}</p></div>`;
+    }
+  };
+  tick();
+}
+
+async function trainCancelJob(id) {
+  if (!confirm(`Cancel training job #${id}? This cannot be undone.`)) return;
+  try {
+    await _trainFetch(`/api/training/jobs/${id}/cancel`, { method: "POST" });
+    toast(`Job #${id} cancelled`);
+  } catch (e) {
+    toast(`Cancel failed: ${e.message}`, "error");
+  }
+}
+
+async function trainPauseJob(id) {
+  const btn = document.getElementById(`train-pause-btn-${id}`);
+  if (btn) { btn.disabled = true; btn.textContent = "Pausing…"; }
+  try {
+    const res = await _trainFetch(`/api/training/jobs/${id}/pause`, { method: "POST" });
+    toast(`Job #${id} paused at step ${(res.paused_at_step || 0).toLocaleString()} — weights saved ✓`);
+    // Stop polling, then do one final fetch to update the card to "paused".
+    if (TRAIN.pollers[id]) { clearTimeout(TRAIN.pollers[id]); delete TRAIN.pollers[id]; }
+    const job = await _trainFetch(`/api/training/jobs/${id}`);
+    trainRenderActive(job, TRAIN.metrics[id] || []);
+    trainRefreshJobs();
+  } catch (e) {
+    toast(`Pause failed: ${e.message}`, "error");
+    if (btn) { btn.disabled = false; btn.textContent = "⏸ Pause"; }
+  }
+}
+
+async function trainResumeJob(id) {
+  const btn = document.getElementById(`train-resume-btn-${id}`);
+  if (btn) { btn.disabled = true; btn.textContent = "Resuming…"; }
+  try {
+    const res = await _trainFetch(`/api/training/jobs/${id}/resume`, { method: "POST" });
+    toast(`Job #${id} resumed (pid ${res.pid}) — loading model…`);
+    // Reset metric buffer so the chart starts fresh for this resume session.
+    TRAIN.lastStep[id] = 0;
+    TRAIN.metrics[id]  = [];
+    trainPollJob(id);
+    trainRefreshJobs();
+  } catch (e) {
+    toast(`Resume failed: ${e.message}`, "error");
+    if (btn) { btn.disabled = false; btn.textContent = "▶ Resume"; }
+  }
+}
+
+/* ── Loss-curve SVG (pure JS, no library) ──────────────────────────── */
+function _trainLossSVG(metrics, width = 600, height = 160) {
+  if (!metrics.length) return `<p class="muted small" style="text-align:center;margin:8px 0">No loss data yet — first report appears after step 50.</p>`;
+  const losses = metrics.map(m => +m.loss);
+  const steps  = metrics.map(m => +m.step);
+  const minL = Math.min(...losses), maxL = Math.max(...losses);
+  const minS = steps[0], maxS = steps[steps.length - 1];
+  const pad = { l: 46, r: 12, t: 8, b: 28 };
+  const W = width - pad.l - pad.r;
+  const H = height - pad.t - pad.b;
+
+  const sx = s => pad.l + (maxS > minS ? (s - minS) / (maxS - minS) * W : W / 2);
+  const sy = l => pad.t + H - (maxL > minL ? (l - minL) / (maxL - minL) * H : H / 2);
+
+  // Polyline
+  const pts = metrics.map(m => `${sx(m.step).toFixed(1)},${sy(m.loss).toFixed(1)}`).join(" ");
+
+  // Y-axis ticks (4 labels)
+  const yTicks = [0, 1, 2, 3].map(i => {
+    const val = minL + (maxL - minL) * i / 3;
+    const y = sy(val);
+    return `<text x="${pad.l - 4}" y="${y.toFixed(1)}" text-anchor="end" dominant-baseline="middle"
+      style="font-size:9px;fill:#888">${val.toFixed(2)}</text>
+      <line x1="${pad.l}" y1="${y.toFixed(1)}" x2="${pad.l + W}" y2="${y.toFixed(1)}"
+        stroke="#2a2a2a" stroke-width="1"/>`;
+  }).join("");
+
+  // X-axis ticks (3 labels)
+  const xTicks = [0, 1, 2].map(i => {
+    const s = minS + (maxS - minS) * i / 2;
+    const x = sx(s);
+    return `<text x="${x.toFixed(1)}" y="${pad.t + H + 14}" text-anchor="middle"
+      style="font-size:9px;fill:#888">${Math.round(s).toLocaleString()}</text>`;
+  }).join("");
+
+  // Gradient fill under curve
+  const areaBot = (pad.t + H).toFixed(1);
+  const area = `${sx(steps[0]).toFixed(1)},${areaBot} ` + pts + ` ${sx(steps[steps.length-1]).toFixed(1)},${areaBot}`;
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" style="display:block;max-height:${height}px">
+    <defs>
+      <linearGradient id="lg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.3"/>
+        <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.02"/>
+      </linearGradient>
+    </defs>
+    ${yTicks}${xTicks}
+    <polygon points="${area}" fill="url(#lg)"/>
+    <polyline points="${pts}" fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-linejoin="round"/>
+    <text x="${pad.l}" y="${pad.t + H + 26}" style="font-size:9px;fill:#555">step</text>
+    <text x="8" y="${pad.t + H / 2}" text-anchor="middle" dominant-baseline="middle"
+      style="font-size:9px;fill:#555" transform="rotate(-90,8,${pad.t + H / 2})">loss</text>
+  </svg>`;
+}
+
+function trainRenderActive(job, metrics) {
+  const el = document.getElementById("train-active");
+  if (!el) return;
+
+  const last         = metrics.length ? metrics[metrics.length - 1] : null;
+  const total        = job.total_iters || 0;
+  // After a resume, mlx_vlm restarts its step counter from 1.
+  // Add the offset so progress reflects the full epoch, not just this session.
+  const resumeOffset = job.paused_at_step || 0;
+  const curStep      = (last ? last.step : 0) + resumeOffset;
+  const pct          = total ? Math.min(100, (curStep / total * 100)).toFixed(1) : null;
+
+  // ETA — use median of last 5 speeds to dampen outliers
+  let etaStr = "";
+  if (last && total && curStep < total) {
+    const recentSpeeds = metrics.slice(-5).map(m => m.it_per_sec).filter(Boolean);
+    const medSpeed = recentSpeeds.length
+      ? recentSpeeds.slice().sort((a,b)=>a-b)[Math.floor(recentSpeeds.length/2)]
+      : last.it_per_sec;
+    if (medSpeed) {
+      const secLeft = (total - curStep) / medSpeed;
+      const h = Math.floor(secLeft / 3600);
+      const m = Math.floor((secLeft % 3600) / 60);
+      etaStr = h > 0 ? `~${h}h ${m}m remaining` : `~${m}m remaining`;
+    }
+  }
+
+  const statusCls = job.status === "completed" ? "ok"
+                  : job.status === "failed"    ? "err"
+                  : job.status === "cancelled" ? "warn"
+                  : job.status === "paused"    ? "warn" : "";
+
+  const actionBtns = (() => {
+    if (job.status === "running") return `
+      <button id="train-pause-btn-${job.id}" class="btn-ghost"
+              onclick="trainPauseJob(${job.id})" style="margin-left:auto"
+              title="Stop after the current iteration and save weights">⏸ Pause</button>
+      <button class="btn-ghost btn-danger-text"
+              onclick="trainCancelJob(${job.id})"
+              title="Permanently stop this job">✕ Stop</button>`;
+    if (job.status === "paused") return `
+      <button id="train-resume-btn-${job.id}" class="btn-ghost"
+              onclick="trainResumeJob(${job.id})" style="margin-left:auto"
+              title="Restart training from the last saved checkpoint">▶ Resume</button>
+      <button class="btn-ghost btn-danger-text"
+              onclick="trainCancelJob(${job.id})"
+              title="Permanently stop this job">✕ Stop</button>`;
+    return "";
+  })();
+
+  // Stat pills
+  const pill = (label, val) => val != null
+    ? `<span style="background:#1e2a3a;border:1px solid #2d3f52;border-radius:4px;padding:3px 10px;font-size:12px">
+         <span style="color:#6b9fca">${label}</span>&nbsp;<strong style="color:#e2f0ff">${val}</strong>
+       </span>`
+    : "";
+
+  const pausedNote = (job.status === "paused" && job.paused_at_step)
+    ? `<span style="color:#f59e0b;font-size:11px">⏸ paused at step ${job.paused_at_step.toLocaleString()} — weights saved</span>`
+    : "";
+
+  const pills = [
+    pill("loss",   last ? (+last.loss).toFixed(4) : null),
+    pill("it/s",   last ? (+last.it_per_sec).toFixed(2) : null),
+    pill("mem",    last ? `${(+last.peak_mem_gb).toFixed(1)} GB` : null),
+    pill("size",   job.adapter_size_mb ? `${job.adapter_size_mb} MB` : null),
+    etaStr   ? `<span style="color:#888;font-size:11px">${_esc(etaStr)}</span>` : "",
+    pausedNote,
+  ].filter(Boolean).join("  ");
+
+  // Progress bar
+  const progressBar = pct != null ? `
+    <div style="background:#1a1a1a;border-radius:4px;height:6px;margin:10px 0;overflow:hidden">
+      <div style="background:#3b82f6;height:100%;width:${pct}%;transition:width 2s ease"></div>
+    </div>
+    <div class="muted small" style="text-align:right;margin-top:2px">
+      ${curStep.toLocaleString()} / ${total.toLocaleString()} steps (${pct}%)
+    </div>` : "";
+
+  // What's in the adapter box
+  const adapterInfo = `
+    <details style="margin-top:12px">
+      <summary class="muted small" style="cursor:pointer">What is being created?</summary>
+      <div style="padding:8px 0;font-size:12px;line-height:1.7;color:#aaa">
+        <strong style="color:#ddd">LoRA adapter</strong> — a set of small weight-delta matrices
+        (~20M parameters, rank-16) added to the frozen 26B base model's attention layers.<br>
+        The adapter file (<code>adapters.safetensors</code>) is ~155 MB. The base model
+        (15 GB 4-bit) is never modified — you load both together at inference time.<br><br>
+        <strong style="color:#ddd">Checkpoints</strong> — every 500 steps a snapshot like
+        <code>0000500_adapters.safetensors</code> is saved alongside the rolling
+        <code>adapters.safetensors</code>. You can benchmark any checkpoint.<br><br>
+        <strong style="color:#ddd">Loss</strong> — cross-entropy on the assistant tokens only
+        (the JSON output). 0 = perfect memorisation. For food classification, 0.5–1.5
+        at end of epoch 1 is healthy. The model learns JSON structure first (loss drops
+        fast), then ingredient/macro values (slower).<br><br>
+        <strong style="color:#ddd">Cleanup</strong> — when done, keep only
+        <code>adapters.safetensors</code> (final) and <code>adapter_config.json</code>.
+        Delete the numbered checkpoints (<code>00005*_adapters.safetensors</code>) to
+        reclaim ~155 MB per checkpoint. The log file is ~10 KB and safe to keep.
+      </div>
+    </details>`;
+
+  // Preserve log scroll position — if user scrolled up, keep their position;
+  // if they were at the bottom (or first render), stay at the bottom.
+  const oldPre = el.querySelector("pre");
+  const wasAtBottom = !oldPre || (oldPre.scrollHeight - oldPre.scrollTop - oldPre.clientHeight < 40);
+  const savedScrollTop = oldPre ? oldPre.scrollTop : 0;
+
+  el.innerHTML = `
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <h3 style="margin:0">
+          Job #${job.id}
+          <span class="muted small">· ${_esc((job.base_model || "").split("/").pop())}</span>
+          <span class="badge ${_esc(statusCls)}">${_esc(job.status)}</span>
+        </h3>
+        ${actionBtns}
+      </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">${pills}</div>
+
+      ${progressBar}
+
+      <div style="margin:12px 0">
+        ${_trainLossSVG(metrics)}
+      </div>
+
+      <details open style="margin-top:8px">
+        <summary class="muted small" style="cursor:pointer">Live log (last 60 lines)</summary>
+        <pre style="max-height:300px;overflow:auto;background:#0b0b0b;color:#bbb;
+                    padding:10px;border-radius:6px;font-size:10.5px;line-height:1.5;
+                    margin-top:6px;white-space:pre-wrap">${_esc(
+          (job.log_tail || "(no log yet)").split("\n").slice(-60).join("\n")
+        )}</pre>
+      </details>
+
+      <p class="muted small" style="margin:8px 0 0">
+        adapter → <code>${_esc(job.adapter_path || "")}</code>
+      </p>
+      ${adapterInfo}
+    </div>`;
+
+  // Restore log scroll position after re-render
+  const newPre = el.querySelector("pre");
+  if (newPre) {
+    if (wasAtBottom) {
+      newPre.scrollTop = newPre.scrollHeight;  // follow the tail
+    } else {
+      newPre.scrollTop = savedScrollTop;        // stay where user was
+    }
+  }
+}
+
+async function trainRefreshJobs() {
+  const el = document.getElementById("train-history");
+  if (!el) return;
+  try {
+    const { jobs } = await _trainFetch("/api/training/jobs");
+    if (!jobs.length) {
+      el.innerHTML = `<p class="muted small">No training jobs yet.</p>`;
+      return;
+    }
+    el.innerHTML = `
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>#</th><th>status</th><th>base</th><th>started</th>
+            <th>ended</th><th>adapter</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${jobs.map(j => {
+            const start = j.started_at ? new Date(j.started_at * 1000).toLocaleString() : "—";
+            const end   = j.ended_at   ? new Date(j.ended_at   * 1000).toLocaleString() : "—";
+            const base  = (j.base_model || "").split("/").pop();
+            return `
+              <tr>
+                <td>${j.id}</td>
+                <td><span class="badge">${_esc(j.status)}</span></td>
+                <td title="${_esc(j.base_model)}">${_esc(base)}</td>
+                <td class="small muted">${_esc(start)}</td>
+                <td class="small muted">${_esc(end)}</td>
+                <td class="small"><code>${_esc(j.adapter_path || "")}</code></td>
+                <td><button class="btn-ghost" onclick="trainPollJob(${j.id})">Open</button></td>
+              </tr>`;
+          }).join("")}
+        </tbody>
+      </table>`;
+    // Auto-open card for running/queued/paused jobs.
+    jobs.filter(j => ["running", "queued", "paused"].includes(j.status))
+        .forEach(j => trainPollJob(j.id));
+  } catch (e) {
+    el.innerHTML = `<p class="muted small">Could not load jobs: ${_esc(e.message)}</p>`;
+  }
+}

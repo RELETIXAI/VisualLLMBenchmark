@@ -38,6 +38,7 @@
     <button data-tab="prompts" class="tab">Prompts</button>
     <button data-tab="runs" class="tab">Runs</button>
     <button data-tab="benchmark" class="tab">Run benchmark</button>
+    <button data-tab="train" class="tab">Train</button>
     <a class="tab" href="/docs" target="_blank" rel="noopener">API ↗</a>
     <div class="tab-sep"></div>
     <button class="tab tab-io" onclick="openExportModal()" title="Export data bundle for another machine">⤓ Export</button>
@@ -191,6 +192,18 @@
           <label class="label">Base URL</label>
           <input id="r-baseurl" type="text" />
         </div>
+        <div id="adapter-block" class="hidden">
+          <label class="label">LoRA adapter
+            <span class="muted small">— MLX only, optional</span>
+            <button type="button" class="link-btn" id="refresh-adapters" style="margin-left:6px">refresh</button>
+          </label>
+          <select id="r-adapter-select" size="1">
+            <option value="">None — base model only</option>
+          </select>
+          <div class="muted small" id="r-adapter-hint" style="margin-top:4px">
+            Fine-tuned weights layered on top of the base model. Pick one to benchmark the fine-tuned version.
+          </div>
+        </div>
         <div>
           <label class="label">Max rows (optional)</label>
           <input id="r-maxrows" type="number" min="1" placeholder="all" value="50" />
@@ -278,6 +291,84 @@
 
     <div id="live-runs" class="hidden"></div>
     <div id="active-run" class="hidden card"></div>
+  </section>
+
+  <!-- TRAIN -->
+  <section class="view hidden" id="view-train">
+    <h2>Fine-tuning</h2>
+    <p class="muted small">
+      LoRA fine-tunes are launched as isolated subprocesses (mlx_vlm.lora) and
+      written to <code>data/adapters/&lt;id&gt;-&lt;model&gt;/</code>.
+      Holdout protection: training data must come from
+      <code>data/sft/train.jsonl</code> (built by
+      <code>scripts/export_sft_dataset.py</code>) which excludes the 64
+      benchmark images.
+    </p>
+
+    <details open class="card">
+      <summary><strong>New training job</strong></summary>
+      <form id="train-form" class="grid-2" onsubmit="event.preventDefault(); trainStartJob();">
+        <div>
+          <label class="label">Base model</label>
+          <select id="train-base"></select>
+        </div>
+        <div>
+          <label class="label">Dataset directory</label>
+          <input id="train-data" value="data/sft" />
+          <span class="muted small">Must contain <code>train.jsonl</code> (and ideally <code>eval.jsonl</code>).</span>
+        </div>
+        <div>
+          <label class="label">LoRA rank</label>
+          <input type="number" id="train-rank" value="16" min="1" max="128"/>
+        </div>
+        <div>
+          <label class="label">Learning rate</label>
+          <input id="train-lr" value="2e-4" />
+        </div>
+        <div>
+          <label class="label">Iterations</label>
+          <input type="number" id="train-iters" value="4000" min="10"/>
+        </div>
+        <div>
+          <label class="label">Batch size</label>
+          <input type="number" id="train-batch" value="1" min="1" max="8"/>
+        </div>
+        <div>
+          <label class="label">Save every (iters)</label>
+          <input type="number" id="train-save" value="200" min="10"/>
+        </div>
+        <div>
+          <label class="label">Sequence length</label>
+          <input type="number" id="train-seq" value="1024" min="128"/>
+        </div>
+        <div style="grid-column:1/-1">
+          <label class="small muted" style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="train-grad-ckpt" checked style="width:auto"/>
+            Gradient checkpointing (recommended on 48 GB Mac)
+          </label>
+          <label class="small muted" style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="train-freeze-vision" checked style="width:auto"/>
+            Freeze vision tower
+          </label>
+          <label class="small muted" style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="train-freeze-experts" checked style="width:auto"/>
+            Freeze routed experts (MoE base only — affects 26B-A4B)
+          </label>
+        </div>
+        <div class="row-end" style="grid-column:1/-1">
+          <button type="submit" class="btn" id="train-start">Start training</button>
+        </div>
+      </form>
+    </details>
+
+    <div id="train-active"></div>
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <h3 style="margin:0">Job history</h3>
+        <button class="btn-ghost" onclick="trainRefreshJobs()">Refresh</button>
+      </div>
+      <div id="train-history"></div>
+    </div>
   </section>
 </main>
 

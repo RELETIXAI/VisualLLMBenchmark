@@ -208,6 +208,33 @@ def init_db() -> None:
                 """)
         except Exception:
             pass
+
+        # Migration: training_jobs table + runs.adapter_path
+        # Used by backend/training.py to launch / monitor / cancel LoRA
+        # fine-tunes via mlx_vlm subprocesses, and by MLXProvider to load
+        # a trained adapter on top of the base model at benchmark time.
+        try:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS training_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    base_model TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    dataset_dir TEXT NOT NULL,
+                    adapter_path TEXT,
+                    log_path TEXT,
+                    metrics_path TEXT,
+                    pid INTEGER,
+                    started_at REAL,
+                    ended_at REAL,
+                    error TEXT
+                )
+            """)
+            cols = {r[1] for r in c.execute("PRAGMA table_info(runs)").fetchall()}
+            if "adapter_path" not in cols:
+                c.execute("ALTER TABLE runs ADD COLUMN adapter_path TEXT")
+        except Exception:
+            pass
         c.executescript("""
         CREATE TABLE IF NOT EXISTS prompts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -512,20 +539,47 @@ def list_dataset_versions(dataset_id: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def _image_id_variants(image_id: str, dataset_id: int | None = None) -> list[str]:
+    """Return all plausible stored forms of an image_id so lookups hit
+    regardless of whether the DB has the bare id, the prefixed form, or both.
+
+    Stored forms seen in the wild:
+      • bare:     "1234-uuid"
+      • prefixed: "6/1234-uuid.jpg"
+    """
+    import re
+    s = str(image_id).strip()
+    # Derive the bare form
+    bare = re.sub(r"^\d+/", "", s)
+    bare = re.sub(r"\.(jpe?g|png|webp|gif|bmp)$", "", bare, flags=re.IGNORECASE)
+    variants = {bare, s}          # always include what was passed in
+    if dataset_id is not None:
+        for ext in (".jpg", ".jpeg", ".png"):
+            variants.add(f"{dataset_id}/{bare}{ext}")
+    return list(variants)
+
+
 def list_image_history(dataset_id: int, image_id: str) -> list[dict]:
+    variants = _image_id_variants(image_id, dataset_id)
+    placeholders = ",".join("?" * len(variants))
     with _conn() as c:
-        rows = c.execute("""
+        rows = c.execute(f"""
             SELECT * FROM correction_history
-            WHERE dataset_id=? AND image_id=?
+            WHERE dataset_id=? AND image_id IN ({placeholders})
             ORDER BY version_after, id
-        """, (dataset_id, image_id)).fetchall()
+        """, (dataset_id, *variants)).fetchall()
         return [dict(r) for r in rows]
 
 
 def replay_history(dataset_id: int, at_version: int) -> dict:
     """Walk history up to and including at_version, return
-    {image_id: <truth dict>}. Items deleted by that version are absent."""
-    import json as _json
+    {bare_image_id: <truth dict>}. Items deleted by that version are absent."""
+    import json as _json, re as _re
+
+    def _bare(s: str) -> str:
+        s = _re.sub(r"^\d+/", "", str(s).strip())
+        return _re.sub(r"\.(jpe?g|png|webp|gif|bmp)$", "", s, flags=_re.IGNORECASE)
+
     state: dict = {}
     with _conn() as c:
         rows = c.execute("""
@@ -534,11 +588,12 @@ def replay_history(dataset_id: int, at_version: int) -> dict:
             ORDER BY version_after, id
         """, (dataset_id, at_version)).fetchall()
     for r in rows:
+        key = _bare(r["image_id"])
         if r["action"] == "delete":
-            state.pop(r["image_id"], None)
+            state.pop(key, None)
         else:
             try:
-                state[r["image_id"]] = _json.loads(r["truth_json"] or "{}")
+                state[key] = _json.loads(r["truth_json"] or "{}")
             except Exception:
                 pass
     return state
@@ -553,10 +608,12 @@ def list_corrections(dataset_id: int) -> list[dict]:
 
 
 def get_correction(dataset_id: int, image_id: str) -> Optional[dict]:
+    variants = _image_id_variants(image_id, dataset_id)
+    placeholders = ",".join("?" * len(variants))
     with _conn() as c:
         r = c.execute(
-            "SELECT * FROM corrections WHERE dataset_id=? AND image_id=?",
-            (dataset_id, image_id)).fetchone()
+            f"SELECT * FROM corrections WHERE dataset_id=? AND image_id IN ({placeholders}) LIMIT 1",
+            (dataset_id, *variants)).fetchone()
         return dict(r) if r else None
 
 

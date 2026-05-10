@@ -103,15 +103,129 @@ def _check_vision_capable(model_path: str) -> None:
             )
 
 
-def _load_model(model_id: str) -> tuple:
+class _LoRAWrapper(object):
+    """Minimal runtime LoRA wrapper.
+
+    Calls the original layer (quantized or float) unchanged, then adds the
+    LoRA contribution to the output:
+
+        y = base_layer(x)  +  (x @ A @ B) * scale
+
+    Why a plain object instead of nn.Module:
+      mlx_vlm's update_modules / set_module_by_name accept any callable as a
+      replacement. Using a plain __call__ object avoids mlx nn.Module
+      parameter-tracking overhead and keeps A/B as pure mx.arrays so they
+      stay on the compute graph without extra boilerplate.
+    """
+    def __init__(self, base, A, B, scale):
+        self.base   = base    # original nn.Linear or nn.QuantizedLinear
+        self.A      = A       # (in_features, rank) — from adapter file
+        self.B      = B       # (rank, out_features) — from adapter file
+        self.scale  = scale
+
+    def __call__(self, x):
+        import mlx.core as mx
+        base_out = self.base(x)
+        # x: (..., in_features)  A: (in_features, rank)  B: (rank, out_features)
+        lora_out = (x @ self.A @ self.B) * self.scale
+        return base_out + lora_out.astype(base_out.dtype)
+
+
+def _apply_lora(model, adapter_path: str) -> object:
+    """Apply a LoRA adapter by wrapping only the trained layers at inference.
+
+    Strategy — output-side wrapper (never touches base weights):
+    ────────────────────────────────────────────────────────────
+    For every (A, B) pair saved in the adapter file we:
+      1. Navigate the model tree to find the exact layer by its full path.
+      2. Replace it with a _LoRAWrapper that calls base_layer(x) and adds
+         (x @ A @ B) * scale to the output.
+
+    This sidesteps all weight-shape and quantisation-layout issues:
+      • The base layer (QuantizedLinear or Linear) handles its own forward
+        pass as usual — we never read or reformat its weights.
+      • A and B come directly from the adapter file — no shape inference.
+      • Only layers present in the adapter file are wrapped; every other
+        linear layer runs untouched.
+    """
+    import json
+    from pathlib import Path
+
+    import mlx.core as mx
+    from mlx_vlm.trainer.utils import set_module_by_name
+
+    adapter_dir = Path(adapter_path)
+    with open(adapter_dir / "adapter_config.json") as f:
+        cfg = json.load(f)
+    rank  = int(cfg.get("rank",  16))
+    alpha = float(cfg.get("alpha", float(rank)))
+    scale = alpha / rank
+
+    lora_weights = mx.load(str(adapter_dir / "adapters.safetensors"))
+
+    # Group into {base_path: {"A": tensor, "B": tensor}}
+    pairs: dict[str, dict] = {}
+    for key, weight in lora_weights.items():
+        if key.endswith(".A"):
+            pairs.setdefault(key[:-2], {})["A"] = weight
+        elif key.endswith(".B"):
+            pairs.setdefault(key[:-2], {})["B"] = weight
+
+    LM_PREFIX = "language_model."
+    lm = model.language_model
+    n_applied = 0
+
+    for full_key, mats in pairs.items():
+        A = mats.get("A")   # (in_features, rank)
+        B = mats.get("B")   # (rank, out_features)
+        if A is None or B is None:
+            continue
+        if not full_key.startswith(LM_PREFIX):
+            continue
+        rel_name = full_key[len(LM_PREFIX):]   # e.g. "model.layers.9.self_attn.v_proj"
+
+        # Navigate to the target layer
+        layer = lm
+        for part in rel_name.split("."):
+            try:
+                layer = layer[int(part)] if part.isdigit() else getattr(layer, part)
+            except (AttributeError, IndexError, TypeError):
+                layer = None
+                break
+        if layer is None or not callable(layer):
+            continue
+
+        wrapper = _LoRAWrapper(layer, A, B, scale)
+        set_module_by_name(lm, rel_name, wrapper)
+        n_applied += 1
+
+    mx.eval(model.parameters())
+    print(f"[mlx]  LoRA: wrapped {n_applied}/{len(pairs)} layers", flush=True)
+    return model
+
+
+def _load_model(model_id: str, adapter_path: str | None = None) -> tuple:
+    """Load (and cache) a model + processor + config, optionally with a
+    LoRA adapter applied on top.
+
+    Cache key: (model_id, adapter_path or ""). A given (base, adapter)
+    pair is loaded once and reused. Loading the same base with a
+    different adapter creates a separate cache entry — this costs
+    extra memory but is safer than mutating an already-loaded model
+    in place (load_adapters is not reversible without a re-load).
+    """
+    key = (model_id, adapter_path or "")
     with _CACHE_LOCK:
-        if model_id not in _CACHE:
+        if key not in _CACHE:
             from mlx_vlm import load
             from mlx_vlm.utils import load_config
             model, processor = load(model_id)
             config = load_config(model_id)
-            _CACHE[model_id] = (model, processor, config)
-        return _CACHE[model_id]
+            if adapter_path:
+                model = _apply_lora(model, adapter_path)
+                print(f"[mlx] loaded adapter: {adapter_path}", flush=True)
+            _CACHE[key] = (model, processor, config)
+        return _CACHE[key]
 
 
 class MLXProvider(BaseProvider):
@@ -160,7 +274,12 @@ class MLXProvider(BaseProvider):
                 img_arg = image_path
 
             try:
-                model, processor, config = _load_model(model_id)
+                # adapter_path travels through gen_params (see RunIn in
+                # backend/main.py). Empty string is treated as no
+                # adapter so users can pass it from a form without
+                # special-casing the empty case.
+                adapter_path = (gp.get("adapter_path") or "").strip() or None
+                model, processor, config = _load_model(model_id, adapter_path)
 
                 # ── chat-template kwargs (controls what the *prompt*
                 # contains — e.g. Qwen3-VL inserts a thinking block here
@@ -173,12 +292,40 @@ class MLXProvider(BaseProvider):
                 else:
                     template_kwargs["enable_thinking"] = False
 
-                # Build prompt with chat template
-                prompt = apply_chat_template(
-                    processor, config, user_prompt,
-                    num_images=1 if img_arg else 0,
-                    **template_kwargs,
-                )
+                # Build prompt with chat template.
+                #
+                # Pre-fix bug: we used to pass the user_prompt as a bare
+                # string, which produces just  '<|image|> {user_prompt}'
+                # — the SYSTEM prompt was silently dropped. This was the
+                # cause of the E4B fine-tune's "repetition collapse" at
+                # inference: the trainer fed messages = [system, user,
+                # assistant] through apply_chat_template (see
+                # mlx_vlm/trainer/datasets.py), so the LoRA learned to
+                # produce JSON conditional on the schema appearing in
+                # the system slot. Without it at inference time, the
+                # model has no anchor and degenerates.
+                #
+                # Fix: when system_prompt is non-empty, build a real
+                # [system, user] message list and let apply_chat_template
+                # render the full turn structure (matches training).
+                # When empty, fall back to the old single-string path so
+                # any caller that relied on it still works.
+                if system_prompt:
+                    msgs = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_prompt},
+                    ]
+                    prompt = apply_chat_template(
+                        processor, config, msgs,
+                        num_images=1 if img_arg else 0,
+                        **template_kwargs,
+                    )
+                else:
+                    prompt = apply_chat_template(
+                        processor, config, user_prompt,
+                        num_images=1 if img_arg else 0,
+                        **template_kwargs,
+                    )
 
                 # Count approximate input tokens
                 try:
