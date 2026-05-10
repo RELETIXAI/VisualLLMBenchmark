@@ -17,7 +17,13 @@ data/_tmp_imports/
 data/sample_food_benchmark.xlsx
 data/embedding_cache.json
 data/machine_id.txt
+data/llmbench.sqlite
+data/adapters/
+data/sft/
 backend/benchmark.db
+
+# Claude Code worktrees
+.claude/
 
 # Secrets
 .env
